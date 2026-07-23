@@ -632,7 +632,6 @@ cat(
   "\n"
 )
 
-
 ############################################################
 ## Identify CpGs retained on both platforms
 ############################################################
@@ -981,11 +980,9 @@ save(
   )
 )
 
-
 ############################################################
 ## Save summary tables and probe lists
 ############################################################
-
 write.csv(
   harmonization_summary,
   file.path(
@@ -1037,7 +1034,6 @@ write.table(
 ############################################################
 ## Final validation
 ############################################################
-
 harmonized_checkpoint <- file.path(
   dir_output,
   "harmonized_EPICv1_EPICv2.RData"
