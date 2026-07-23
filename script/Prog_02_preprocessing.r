@@ -1,23 +1,40 @@
 ##------------------------------------------------------------
-# DNA METHYLATION PREPROCESSING
+# DNA METHYLATION SAMPLE QC AND NOOB NORMALIZATION
 # Brain IDH-mutant FFPE tissue
 #
 # Platforms:
 #   - Illumina MethylationEPIC v1: 3 samples
 #   - Illumina MethylationEPIC v2: 26 samples
 #
+# Input data:
+#   - Raw platform-specific RGChannelSet objects
+#   - Validated targets table
+#   - Clinical and sample-level metadata
+#
 # Current objective:
-#   1. Load raw RGChannelSet objects
-#   2. Verify and repair sample metadata
-#   3. Calculate detection P-values
-#   4. Perform sample-level QC
-#   5. Normalize EPIC v1 and EPIC v2 separately using Noob
-#   6. Filter unreliable probes
-#   7. Generate Beta and M-value matrices
-#   8. Save processed objects
+#   1. Calculate raw detection P-values
+#   2. Summarize sample-level detection performance
+#   3. Assess raw methylated and unmethylated signal intensity
+#   4. Identify and document samples requiring QC review
+#   5. Exclude samples with strong combined QC failure
+#   6. Normalize EPIC v1 and EPIC v2 separately using Noob
+#   7. Generate normalized Beta-value and M-value matrices
+#   8. Perform post-normalization signal and density QC
+#   9. Perform platform-specific PCA
+#  10. Save normalized objects, QC summaries, and metadata
+#
+# Sample handling:
+#   - GSM9325977 is excluded before normalization because of
+#     >5% failed probes and markedly reduced signal intensity.
+#   - GSM9325994 and GSM9325997 are retained with QC-monitoring flags.
+#   - Other post-Noob intensity warnings are retained for sensitivity
+#     analyses because of the limited cohort size.
 #
 # Important:
-#   EPIC v1 and EPIC v2 are NOT combined in this script.
+#   - EPIC v1 and EPIC v2 are normalized and evaluated separately.
+#   - EPIC v1 and EPIC v2 are NOT combined in this script.
+#   - Probe filtering and cross-platform harmonization will be
+#     performed in the next script.
 ##------------------------------------------------------------
 ##################################################
 ## library
@@ -427,7 +444,6 @@ stopifnot(
 ############################################################
 ## Generate Noob-normalized Beta and M-value matrices
 ############################################################
-
 beta_noob_EPICv1 <- getBeta(mSet_noob_EPICv1)
 beta_noob_EPICv2 <- getBeta(mSet_noob_EPICv2)
 
@@ -558,3 +574,143 @@ text(
 )
 
 dev.off()
+
+
+p_pca_sentrix <- ggplot(
+  pca_EPICv2_noob$data,
+  aes(
+    x = PC1,
+    y = PC2,
+    color = Sentrix_ID
+  )
+) +
+  geom_point(size = 3) +
+  geom_text(
+    aes(label = Sample_Name),
+    size = 2.5,
+    vjust = -0.7,
+    show.legend = FALSE
+  ) +
+  labs(
+    title = "EPIC v2 PCA by Sentrix ID",
+    x = paste0(
+      "PC1 (",
+      round(
+        pca_EPICv2_noob$variance_explained[1],
+        1
+      ),
+      "%)"
+    ),
+    y = paste0(
+      "PC2 (",
+      round(
+        pca_EPICv2_noob$variance_explained[2],
+        1
+      ),
+      "%)"
+    )
+  ) +
+  theme_bw()
+
+ggsave(
+  file.path(
+    dir_figures,
+    "EPICv2_noob_PCA_SentrixID.pdf"
+  ),
+  p_pca_sentrix,
+  width = 8,
+  height = 7
+)
+
+############################################################
+## Save post-Noob normalization checkpoint
+############################################################
+
+save(
+  # Full and retained metadata
+  targets,
+  targets_EPICv1,
+  targets_EPICv2,
+  targets_EPICv1_qc,
+  targets_EPICv2_qc,
+
+  # Detection P-values
+  detP_EPICv1,
+  detP_EPICv2,
+
+  # QC-retained raw objects
+  rgSet_EPICv1_qc,
+  rgSet_EPICv2_qc,
+
+  # Raw signal objects and summaries
+  mSet_raw_EPICv1,
+  mSet_raw_EPICv2,
+  qc_signal_EPICv1,
+  qc_signal_EPICv2,
+
+  # Sample-level QC summaries
+  sample_qc_EPICv1,
+  sample_qc_EPICv2,
+
+  # Noob-normalized objects
+  mSet_noob_EPICv1,
+  mSet_noob_EPICv2,
+
+  # Normalized matrices
+  beta_noob_EPICv1,
+  beta_noob_EPICv2,
+  mval_noob_EPICv1,
+  mval_noob_EPICv2,
+
+  # Post-Noob signal QC
+  qc_noob_EPICv1,
+  qc_noob_EPICv2,
+
+  # PCA results
+  pca_EPICv1_noob,
+  pca_EPICv2_noob,
+
+  file = file.path(
+    dir_output,
+    "post_noob_checkpoint.RData"
+  )
+)
+
+############################################################
+## Save metadata and QC tables
+############################################################
+write.csv(
+  targets_EPICv1_qc,
+  file.path(
+    dir_output,
+    "EPICv1_retained_metadata.csv"
+  ),
+  row.names = FALSE
+)
+
+write.csv(
+  targets_EPICv2_qc,
+  file.path(
+    dir_output,
+    "EPICv2_retained_metadata.csv"
+  ),
+  row.names = FALSE
+)
+
+write.csv(
+  sample_qc_EPICv1,
+  file.path(
+    dir_output,
+    "EPICv1_sample_QC.csv"
+  ),
+  row.names = FALSE
+)
+
+write.csv(
+  sample_qc_EPICv2,
+  file.path(
+    dir_output,
+    "EPICv2_sample_QC.csv"
+  ),
+  row.names = FALSE
+)
