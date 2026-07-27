@@ -1,15 +1,28 @@
 ##------------------------------------------------------------
-## 04. SOLID FILTER MATCHED TISSUE–PLASMA 1-KB REGIONS
+## 04. SOLID MATCHED TISSUE–PLASMA FILTERING
 ##
 ## Purpose:
-##   1. Load projected tumour EPIC 1-kb values from script 03
-##   2. Load plasma 5-base Beta, coverage, and covered-CpG matrices
-##   3. Match SOLID tumour–plasma patient pairs
-##   4. merge clinical metadata for downstream figures
-##   5. apply paired technical and regional filtering
-##   6. save paired tissue, plasma, delta-Beta, and delta-M matrices
+##   1. Load tumour EPIC Beta values projected to plasma-defined 1-kb regions
+##   2. Load SOLID plasma 5-base Beta, coverage, and covered-CpG matrices
+##   3. Read the plasma-to-patient mapping workbook
+##   4. map plasma sequencing sample IDs to SOLID patient IDs
+##   5. identify the 13 matched tumour–plasma patient pairs
+##   6. align tissue and plasma columns in identical patient order
+##   7. apply pair-specific technical and region-level filters
+##   8. save filtered Beta, M-value, delta-Beta, and delta-M matrices
 ##
-## Delta Beta = plasma - tissue
+## Definitions:
+##   delta Beta = plasma Beta - tissue Beta
+##   delta M    = plasma M - tissue M
+##
+## Expected input from script 03:
+##   result/tissue-plasma/matched_preparation/
+##
+## Mapping workbook:
+##   data/solid_cfDNA_leftover_with_medip_FINAL.xlsx
+##
+## Output:
+##   result/tissue-plasma/paired_filtered/
 ##------------------------------------------------------------
 
 options(
@@ -34,13 +47,21 @@ minimum_valid_pairs <- 10L
 beta_epsilon <- 1e-6
 save_valid_pair_mask <- TRUE
 
+## Workbook sheet containing:
+##   solid_name
+##   MeDIP_ID
+##
+## Use 1L for the first sheet.
+mapping_sheet <- 1L
+
 ##------------------------------------------------------------
-## 2. PACKAGES
+## 2. REQUIRED PACKAGES
 ##------------------------------------------------------------
 
 required_packages <- c(
   "data.table",
-  "matrixStats"
+  "matrixStats",
+  "readxl"
 )
 
 missing_packages <- required_packages[
@@ -54,14 +75,22 @@ missing_packages <- required_packages[
 
 if (length(missing_packages) > 0L) {
   stop(
-    "Missing package(s): ",
-    paste(missing_packages, collapse = ", ")
+    "Missing required package(s): ",
+    paste(missing_packages, collapse = ", "),
+    "\nInstall with:\n",
+    "install.packages(c(",
+    paste(
+      sprintf('"%s"', missing_packages),
+      collapse = ", "
+    ),
+    "))"
   )
 }
 
 suppressPackageStartupMessages({
   library(data.table)
   library(matrixStats)
+  library(readxl)
 })
 
 ##------------------------------------------------------------
@@ -94,17 +123,32 @@ clinical_metadata_file <- file.path(
   "meta_data_research.csv"
 )
 
+mapping_file <- file.path(
+  project_dir,
+  "data",
+  "solid_cfDNA_leftover_with_medip_FINAL.xlsx"
+)
+
 dir.create(
   paired_dir,
   recursive = TRUE,
   showWarnings = FALSE
 )
 
-stopifnot(
-  dir.exists(projection_dir),
-  dir.exists(plasma_dir),
-  dir.exists(paired_dir)
-)
+if (!dir.exists(projection_dir)) {
+  stop(
+    "Projection directory not found:\n",
+    projection_dir,
+    "\nRun script 03 first."
+  )
+}
+
+if (!dir.exists(plasma_dir)) {
+  stop(
+    "Plasma directory not found:\n",
+    plasma_dir
+  )
+}
 
 ##------------------------------------------------------------
 ## 4. INPUT FILES
@@ -140,11 +184,6 @@ plasma_cpg_file <- file.path(
   "SOLID_1kb_covered_CpGs_cov5_n7_standard_chr.rds"
 )
 
-plasma_processing_metadata_file <- file.path(
-  plasma_dir,
-  "SOLID_1kb_processing_metadata.rds"
-)
-
 plasma_qc_file <- file.path(
   plasma_dir,
   "SOLID_5base_sample_QC.tsv"
@@ -157,8 +196,8 @@ required_files <- c(
   plasma_beta_file,
   plasma_coverage_file,
   plasma_cpg_file,
-  plasma_processing_metadata_file,
-  plasma_qc_file
+  plasma_qc_file,
+  mapping_file
 )
 
 file_check <- data.table(
@@ -169,8 +208,8 @@ file_check <- data.table(
     "plasma_beta",
     "plasma_coverage",
     "plasma_covered_cpgs",
-    "plasma_processing_metadata",
-    "plasma_qc"
+    "plasma_qc",
+    "plasma_mapping_workbook"
   ),
   path = required_files,
   exists = file.exists(required_files)
@@ -189,7 +228,7 @@ if (any(!file_check$exists)) {
 }
 
 ##------------------------------------------------------------
-## 5. HELPERS
+## 5. HELPER FUNCTIONS
 ##------------------------------------------------------------
 
 message_header <- function(text) {
@@ -211,11 +250,32 @@ detect_column <- function(
     table_name,
     required = TRUE
 ) {
-  detected <- candidates[
-    candidates %in% names(dat)
+  normalized_names <- tolower(
+    gsub(
+      "[^a-z0-9]+",
+      "_",
+      names(dat)
+    )
+  )
+
+  normalized_candidates <- tolower(
+    gsub(
+      "[^a-z0-9]+",
+      "_",
+      candidates
+    )
+  )
+
+  detected_index <- match(
+    normalized_candidates,
+    normalized_names
+  )
+
+  detected_index <- detected_index[
+    !is.na(detected_index)
   ]
 
-  if (length(detected) == 0L) {
+  if (length(detected_index) == 0L) {
     if (required) {
       stop(
         "Could not identify a required column in ",
@@ -230,10 +290,10 @@ detect_column <- function(
     return(NULL)
   }
 
-  detected[[1]]
+  names(dat)[detected_index[[1]]]
 }
 
-extract_SOLID_id <- function(x) {
+extract_SOLID_patient_id <- function(x) {
   x <- toupper(as.character(x))
   x <- gsub("_", "-", x)
 
@@ -243,14 +303,75 @@ extract_SOLID_id <- function(x) {
   )
 
   has_id <- grepl(
-    "SOLID-[0-9]+",
+    "SOLID-?[0-9]+",
     x
   )
 
-  out[has_id] <- sub(
-    ".*?(SOLID-[0-9]+).*",
-    "\\1",
-    x[has_id]
+  numeric_id <- suppressWarnings(
+    as.integer(
+      sub(
+        ".*?SOLID-?0*([0-9]+).*",
+        "\\1",
+        x[has_id]
+      )
+    )
+  )
+
+  out[has_id] <- sprintf(
+    "SOLID-%03d",
+    numeric_id
+  )
+
+  out
+}
+
+extract_plasma_batch_number <- function(x) {
+  x <- as.character(x)
+
+  matched <- grepl(
+    "^SOLID_[0-9]+_",
+    x
+  )
+
+  out <- rep(
+    NA_integer_,
+    length(x)
+  )
+
+  out[matched] <- suppressWarnings(
+    as.integer(
+      sub(
+        "^SOLID_0*([0-9]+)_.*$",
+        "\\1",
+        x[matched]
+      )
+    )
+  )
+
+  out
+}
+
+extract_medip_batch_number <- function(x) {
+  x <- as.character(x)
+
+  matched <- grepl(
+    "_[0-9]+$",
+    x
+  )
+
+  out <- rep(
+    NA_integer_,
+    length(x)
+  )
+
+  out[matched] <- suppressWarnings(
+    as.integer(
+      sub(
+        ".*_([0-9]+)$",
+        "\\1",
+        x[matched]
+      )
+    )
   )
 
   out
@@ -313,6 +434,8 @@ tissue_metadata <- fread(
 
 stopifnot(
   is.matrix(tissue_beta),
+  nrow(tissue_beta) > 0L,
+  ncol(tissue_beta) > 0L,
   nrow(projected_annotation) ==
     nrow(tissue_beta),
   identical(
@@ -360,7 +483,7 @@ tissue_metadata[
 tissue_metadata[
   ,
   patient_id :=
-    extract_SOLID_id(
+    extract_SOLID_patient_id(
       get(tissue_patient_column)
     )
 ]
@@ -368,7 +491,7 @@ tissue_metadata[
 tissue_metadata[
   is.na(patient_id),
   patient_id :=
-    extract_SOLID_id(
+    extract_SOLID_patient_id(
       tissue_sample_id
     )
 ]
@@ -410,8 +533,7 @@ if (anyDuplicated(tissue_metadata$patient_id)) {
 
   stop(
     "Multiple tissue samples found for patient(s): ",
-    paste(duplicated_ids, collapse = ", "),
-    "\nResolve duplicate patient samples before paired analysis."
+    paste(duplicated_ids, collapse = ", ")
   )
 }
 
@@ -447,10 +569,6 @@ plasma_covered_cpgs <- readRDS(
   plasma_cpg_file
 )
 
-plasma_processing_metadata <- readRDS(
-  plasma_processing_metadata_file
-)
-
 plasma_qc <- fread(
   plasma_qc_file
 )
@@ -459,6 +577,8 @@ stopifnot(
   is.matrix(plasma_beta),
   is.matrix(plasma_coverage),
   is.matrix(plasma_covered_cpgs),
+  nrow(plasma_beta) > 0L,
+  ncol(plasma_beta) > 0L,
   identical(
     dim(plasma_beta),
     dim(plasma_coverage)
@@ -479,103 +599,199 @@ stopifnot(
     nrow(plasma_beta)
 )
 
+cat(
+  "Plasma matrix:",
+  paste(dim(plasma_beta), collapse = " x "),
+  "\n"
+)
+
+##------------------------------------------------------------
+## 8. READ AND PREPARE THE PLASMA MAPPING WORKBOOK
+##------------------------------------------------------------
+
+message_header(
+  "READING PLASMA SAMPLE MAPPING WORKBOOK"
+)
+
+available_sheets <- readxl::excel_sheets(
+  mapping_file
+)
+
+cat(
+  "Available workbook sheets:",
+  paste(available_sheets, collapse = ", "),
+  "\n"
+)
+
+sample_mapping <- as.data.table(
+  readxl::read_excel(
+    mapping_file,
+    sheet = mapping_sheet
+  )
+)
+
+cat(
+  "Mapping table dimensions:",
+  paste(dim(sample_mapping), collapse = " x "),
+  "\n"
+)
+
+cat(
+  "Mapping table columns:\n",
+  paste(names(sample_mapping), collapse = ", "),
+  "\n"
+)
+
+solid_name_column <- detect_column(
+  sample_mapping,
+  c(
+    "solid_name",
+    "solid name",
+    "solid.name",
+    "SOLID_name",
+    "SOLID"
+  ),
+  "mapping workbook"
+)
+
+medip_id_column <- detect_column(
+  sample_mapping,
+  c(
+    "MeDIP_ID",
+    "MeDIP ID",
+    "MeDIP.ID",
+    "medip_id",
+    "batch_id"
+  ),
+  "mapping workbook"
+)
+
+sample_mapping[
+  ,
+  solid_number :=
+    suppressWarnings(
+      as.integer(
+        get(solid_name_column)
+      )
+    )
+]
+
+sample_mapping[
+  ,
+  mapping_MeDIP_ID :=
+    as.character(
+      get(medip_id_column)
+    )
+]
+
+sample_mapping[
+  ,
+  batch_number :=
+    extract_medip_batch_number(
+      mapping_MeDIP_ID
+    )
+]
+
+sample_mapping[
+  ,
+  patient_id :=
+    ifelse(
+      is.na(solid_number),
+      NA_character_,
+      sprintf(
+        "SOLID-%03d",
+        solid_number
+      )
+    )
+]
+
+mapping_lookup <- unique(
+  sample_mapping[
+    !is.na(batch_number) &
+      !is.na(patient_id),
+    .(
+      batch_number,
+      patient_id,
+      mapping_MeDIP_ID
+    )
+  ]
+)
+
+## Verify that each sequencing batch maps to exactly one patient
+batch_patient_counts <- mapping_lookup[
+  ,
+  .(
+    n_patients =
+      uniqueN(patient_id)
+  ),
+  by = batch_number
+]
+
+conflicting_batches <- batch_patient_counts[
+  n_patients > 1L
+]
+
+if (nrow(conflicting_batches) > 0L) {
+  stop(
+    "Some MeDIP batch numbers map to more than one SOLID patient:\n",
+    paste(
+      conflicting_batches$batch_number,
+      collapse = ", "
+    )
+  )
+}
+
+mapping_lookup <- mapping_lookup[
+  !duplicated(batch_number)
+]
+
+cat(
+  "Unique mapping batches:",
+  nrow(mapping_lookup),
+  "\n"
+)
+
+##------------------------------------------------------------
+## 9. MAP PLASMA MATRIX COLUMNS TO SOLID PATIENTS
+##------------------------------------------------------------
+
+message_header(
+  "MAPPING PLASMA SAMPLES TO SOLID PATIENTS"
+)
+
 plasma_metadata <- data.table(
   plasma_sample_id =
-    colnames(plasma_beta),
-  patient_id =
-    extract_SOLID_id(
-      colnames(plasma_beta)
+    colnames(plasma_beta)
+)
+
+plasma_metadata[
+  ,
+  batch_number :=
+    extract_plasma_batch_number(
+      plasma_sample_id
     )
-)
+]
 
-## Try to recover patient IDs from the plasma QC table if needed
-qc_sample_column <- detect_column(
-  plasma_qc,
-  c(
-    "sample_id",
-    "Sample_ID",
-    "SampleID",
-    "sample",
-    "Sample",
-    "sample_name",
-    "Sample_Name"
-  ),
-  "plasma QC",
-  required = FALSE
-)
-
-qc_patient_column <- detect_column(
-  plasma_qc,
-  c(
-    "patient_id",
-    "Patient_ID",
-    "Subject",
-    "SolidID",
-    "SOLID_ID",
-    "subject_id",
-    "Study"
-  ),
-  "plasma QC",
-  required = FALSE
-)
-
-if (!is.null(qc_sample_column)) {
-  plasma_qc[
-    ,
-    plasma_sample_id :=
-      as.character(
-        get(qc_sample_column)
-      )
-  ]
-
-  if (!is.null(qc_patient_column)) {
-    plasma_qc[
-      ,
-      qc_patient_id :=
-        extract_SOLID_id(
-          get(qc_patient_column)
-        )
-    ]
-  } else {
-    plasma_qc[
-      ,
-      qc_patient_id :=
-        extract_SOLID_id(
-          plasma_sample_id
-        )
-    ]
-
-  }
-
-  qc_id_table <- unique(
-    plasma_qc[
-      ,
-      .(
-        plasma_sample_id,
-        qc_patient_id
-      )
-    ]
+if (anyNA(plasma_metadata$batch_number)) {
+  stop(
+    "Could not extract sequencing batch numbers from:\n",
+    paste(
+      plasma_metadata[
+        is.na(batch_number),
+        plasma_sample_id
+      ],
+      collapse = ", "
+    )
   )
-
-  plasma_metadata <- merge(
-    plasma_metadata,
-    qc_id_table,
-    by = "plasma_sample_id",
-    all.x = TRUE,
-    sort = FALSE
-  )
-
-  plasma_metadata[
-    is.na(patient_id),
-    patient_id :=
-      qc_patient_id
-  ]
-
-  plasma_metadata[
-    ,
-    qc_patient_id := NULL
-  ]
 }
+
+plasma_metadata <- merge(
+  plasma_metadata,
+  mapping_lookup,
+  by = "batch_number",
+  all.x = TRUE,
+  sort = FALSE
+)
 
 plasma_metadata <- plasma_metadata[
   match(
@@ -586,15 +802,14 @@ plasma_metadata <- plasma_metadata[
 
 if (anyNA(plasma_metadata$patient_id)) {
   stop(
-    "Could not identify SOLID patient IDs for plasma samples:\n",
+    "These plasma samples could not be mapped to SOLID patients:\n",
     paste(
       plasma_metadata[
         is.na(patient_id),
         plasma_sample_id
       ],
       collapse = ", "
-    ),
-    "\nInspect colnames(plasma_beta) and the plasma QC table."
+    )
   )
 }
 
@@ -608,26 +823,31 @@ if (anyDuplicated(plasma_metadata$patient_id)) {
   )
 
   stop(
-    "Multiple plasma samples found for patient(s): ",
-    paste(duplicated_ids, collapse = ", "),
-    "\nResolve duplicate patient samples before paired analysis."
+    "Multiple selected plasma samples map to patient(s): ",
+    paste(duplicated_ids, collapse = ", ")
   )
 }
 
-cat(
-  "Plasma matrix:",
-  paste(dim(plasma_beta), collapse = " x "),
-  "\n"
+print(
+  plasma_metadata[
+    ,
+    .(
+      plasma_sample_id,
+      batch_number,
+      mapping_MeDIP_ID,
+      patient_id
+    )
+  ]
 )
 
 cat(
-  "Unique plasma patients:",
+  "Unique mapped plasma patients:",
   uniqueN(plasma_metadata$patient_id),
   "\n"
 )
 
 ##------------------------------------------------------------
-## 8. IDENTIFY MATCHED PATIENTS
+## 10. IDENTIFY MATCHED PATIENTS
 ##------------------------------------------------------------
 
 message_header(
@@ -673,6 +893,18 @@ cat(
   "\n"
 )
 
+cat(
+  "Matched IDs:",
+  paste(matched_patients, collapse = ", "),
+  "\n"
+)
+
+cat(
+  "Plasma-only IDs:",
+  paste(plasma_only_patients, collapse = ", "),
+  "\n"
+)
+
 if (
   length(matched_patients) !=
     expected_matched_patients
@@ -682,9 +914,7 @@ if (
     expected_matched_patients,
     " matched patients but found ",
     length(matched_patients),
-    ".\nMatched IDs:\n",
-    paste(matched_patients, collapse = ", "),
-    "\nTissue-only IDs:\n",
+    ".\nTissue-only IDs:\n",
     paste(tissue_only_patients, collapse = ", "),
     "\nPlasma-only IDs:\n",
     paste(plasma_only_patients, collapse = ", ")
@@ -703,7 +933,9 @@ matched_samples <- merge(
     patient_id %in% matched_patients,
     .(
       patient_id,
-      plasma_sample_id
+      plasma_sample_id,
+      batch_number,
+      mapping_MeDIP_ID
     )
   ],
   by = "patient_id",
@@ -714,10 +946,19 @@ matched_samples <- merge(
 stopifnot(
   nrow(matched_samples) ==
     expected_matched_patients,
-  !anyDuplicated(matched_samples$patient_id)
+  !anyDuplicated(matched_samples$patient_id),
+  !anyDuplicated(matched_samples$tissue_sample_id),
+  !anyDuplicated(matched_samples$plasma_sample_id)
 )
 
-## Add the complete tissue metadata
+##------------------------------------------------------------
+## 11. BUILD MATCHED METADATA
+##------------------------------------------------------------
+
+message_header(
+  "BUILDING MATCHED METADATA"
+)
+
 matched_metadata <- merge(
   matched_samples,
   tissue_metadata,
@@ -729,7 +970,6 @@ matched_metadata <- merge(
   sort = FALSE
 )
 
-## Add external clinical metadata if available
 if (file.exists(clinical_metadata_file)) {
   clinical_metadata <- fread(
     clinical_metadata_file
@@ -753,7 +993,7 @@ if (file.exists(clinical_metadata_file)) {
     clinical_metadata[
       ,
       patient_id :=
-        extract_SOLID_id(
+        extract_SOLID_patient_id(
           get(clinical_patient_column)
         )
     ]
@@ -803,47 +1043,16 @@ matched_metadata <- matched_metadata[
 ]
 
 stopifnot(
+  nrow(matched_metadata) ==
+    expected_matched_patients,
   identical(
     matched_metadata$patient_id,
     matched_patients
   )
 )
 
-fwrite(
-  matched_metadata,
-  file.path(
-    paired_dir,
-    "SOLID_matched_tissue_plasma_metadata.tsv"
-  ),
-  sep = "\t"
-)
-
-unmatched_table <- rbindlist(
-  list(
-    data.table(
-      dataset = "tissue_only",
-      patient_id = tissue_only_patients
-    ),
-    data.table(
-      dataset = "plasma_only",
-      patient_id = plasma_only_patients
-    )
-  ),
-  use.names = TRUE,
-  fill = TRUE
-)
-
-fwrite(
-  unmatched_table,
-  file.path(
-    paired_dir,
-    "SOLID_unmatched_patients.tsv"
-  ),
-  sep = "\t"
-)
-
 ##------------------------------------------------------------
-## 9. MATCH SAMPLE COLUMNS
+## 12. CREATE MATCHED SAMPLE INDICES
 ##------------------------------------------------------------
 
 message_header(
@@ -862,22 +1071,31 @@ plasma_column_indices <- match(
 
 stopifnot(
   !anyNA(tissue_column_indices),
-  !anyNA(plasma_column_indices)
+  !anyNA(plasma_column_indices),
+  identical(
+    colnames(tissue_beta)[tissue_column_indices],
+    matched_metadata$tissue_sample_id
+  ),
+  identical(
+    colnames(plasma_beta)[plasma_column_indices],
+    matched_metadata$plasma_sample_id
+  )
 )
 
 patient_order <- matched_metadata$patient_id
 n_pairs <- length(patient_order)
 
 ##------------------------------------------------------------
-## 10. SUBSET TO PROJECTED REGIONS AND MATCHED PATIENTS
+## 13. SUBSET TO PROJECTED REGIONS AND MATCHED PATIENTS
 ##------------------------------------------------------------
 
 message_header(
   "SUBSETTING MATCHED MATRICES"
 )
 
-plasma_row_indices <- projected_annotation$
-  plasma_row_index
+plasma_row_indices <- as.integer(
+  projected_annotation$plasma_row_index
+)
 
 matched_tissue_beta <- tissue_beta[
   ,
@@ -925,6 +1143,9 @@ colnames(matched_plasma_cpgs) <-
   patient_order
 
 stopifnot(
+  nrow(matched_tissue_beta) > 0L,
+  ncol(matched_tissue_beta) ==
+    expected_matched_patients,
   identical(
     dim(matched_tissue_beta),
     dim(matched_plasma_beta)
@@ -945,7 +1166,6 @@ cat(
   "\n"
 )
 
-## Release full matrices
 rm(
   tissue_beta,
   plasma_beta,
@@ -958,7 +1178,7 @@ invisible(
 )
 
 ##------------------------------------------------------------
-## 11. APPLY PAIR-SPECIFIC FILTERING
+## 14. APPLY PAIRED TECHNICAL FILTERING
 ##------------------------------------------------------------
 
 message_header(
@@ -1024,12 +1244,14 @@ cat(
 
 if (!any(retain_region)) {
   stop(
-    "No regions passed the selected filtering criteria."
+    "No regions passed filtering.\n",
+    "Inspect plasma coverage and covered-CpG distributions, ",
+    "or reconsider the selected thresholds."
   )
 }
 
 ##------------------------------------------------------------
-## 12. CREATE FILTERED PAIRED MATRICES
+## 15. CREATE FILTERED PAIRED MATRICES
 ##------------------------------------------------------------
 
 message_header(
@@ -1079,6 +1301,9 @@ paired_delta_M <- paired_plasma_M -
   paired_tissue_M
 
 stopifnot(
+  nrow(paired_tissue_beta) > 0L,
+  ncol(paired_tissue_beta) ==
+    expected_matched_patients,
   identical(
     dim(paired_tissue_beta),
     dim(paired_plasma_beta)
@@ -1086,6 +1311,10 @@ stopifnot(
   identical(
     dim(paired_tissue_beta),
     dim(paired_delta_beta)
+  ),
+  identical(
+    dim(paired_tissue_beta),
+    dim(paired_delta_M)
   ),
   identical(
     rownames(paired_tissue_beta),
@@ -1102,7 +1331,7 @@ stopifnot(
 )
 
 ##------------------------------------------------------------
-## 13. CREATE REGION SUMMARY
+## 16. CREATE REGION-LEVEL SUMMARY
 ##------------------------------------------------------------
 
 message_header(
@@ -1196,6 +1425,7 @@ retained_annotation[
 ]
 
 stopifnot(
+  nrow(retained_annotation) > 0L,
   identical(
     retained_annotation$region_id,
     rownames(paired_tissue_beta)
@@ -1203,11 +1433,11 @@ stopifnot(
 )
 
 ##------------------------------------------------------------
-## 14. FILTER SENSITIVITY SUMMARY
+## 17. FILTER SENSITIVITY AND SUMMARY
 ##------------------------------------------------------------
 
 message_header(
-  "CREATING FILTER SENSITIVITY SUMMARY"
+  "CREATING FILTER SUMMARIES"
 )
 
 EPIC_probe_thresholds <- c(
@@ -1263,14 +1493,6 @@ filter_sensitivity <- rbindlist(
   )
 )
 
-print(
-  filter_sensitivity
-)
-
-##------------------------------------------------------------
-## 15. CREATE FILTER SUMMARY
-##------------------------------------------------------------
-
 filter_summary <- data.table(
   item = c(
     "tissue_samples_input",
@@ -1300,22 +1522,21 @@ filter_summary <- data.table(
   )
 )
 
-print(
-  filter_summary
-)
-
 filter_settings <- data.table(
   setting = c(
     "delta_beta_definition",
+    "delta_M_definition",
     "minimum_plasma_coverage",
     "minimum_plasma_covered_cpgs",
     "minimum_EPIC_probes",
     "minimum_valid_pairs",
     "beta_epsilon",
     "tissue_aggregation_method",
-    "genome_build"
+    "genome_build",
+    "mapping_workbook"
   ),
   value = c(
+    "plasma_minus_tissue",
     "plasma_minus_tissue",
     minimum_plasma_coverage,
     minimum_plasma_covered_cpgs,
@@ -1323,12 +1544,41 @@ filter_settings <- data.table(
     minimum_valid_pairs,
     beta_epsilon,
     "median_EPIC_beta_within_1kb_region",
-    "hg38"
+    "hg38",
+    basename(mapping_file)
+  )
+)
+
+print(filter_summary)
+print(filter_sensitivity)
+
+##------------------------------------------------------------
+## 18. FINAL SAFETY CHECK BEFORE SAVING
+##------------------------------------------------------------
+
+message_header(
+  "FINAL VALIDATION BEFORE SAVING"
+)
+
+stopifnot(
+  n_pairs == expected_matched_patients,
+  nrow(matched_metadata) ==
+    expected_matched_patients,
+  nrow(paired_tissue_beta) > 0L,
+  ncol(paired_tissue_beta) ==
+    expected_matched_patients,
+  nrow(paired_plasma_beta) > 0L,
+  nrow(paired_delta_beta) > 0L,
+  nrow(paired_delta_M) > 0L,
+  nrow(retained_annotation) > 0L,
+  identical(
+    rownames(paired_tissue_beta),
+    retained_annotation$region_id
   )
 )
 
 ##------------------------------------------------------------
-## 16. SAVE OUTPUTS
+## 19. SAVE OUTPUTS
 ##------------------------------------------------------------
 
 message_header(
@@ -1404,6 +1654,24 @@ fwrite(
 )
 
 fwrite(
+  matched_metadata,
+  file.path(
+    paired_dir,
+    "SOLID_matched_tissue_plasma_metadata.tsv"
+  ),
+  sep = "\t"
+)
+
+fwrite(
+  plasma_metadata,
+  file.path(
+    paired_dir,
+    "SOLID_plasma_sample_to_patient_mapping.tsv"
+  ),
+  sep = "\t"
+)
+
+fwrite(
   filter_summary,
   file.path(
     paired_dir,
@@ -1476,6 +1744,8 @@ paired_filtered_object <- list(
     retained_annotation,
   matched_metadata =
     matched_metadata,
+  plasma_mapping =
+    plasma_metadata,
   settings =
     as.list(
       setNames(
@@ -1492,6 +1762,25 @@ saveRDS(
     "SOLID_paired_filtered_object.rds"
   )
 )
+
+## Reload and verify the saved object
+validation_object <- readRDS(
+  file.path(
+    paired_dir,
+    "SOLID_paired_filtered_object.rds"
+  )
+)
+
+stopifnot(
+  nrow(validation_object$delta_M) > 0L,
+  ncol(validation_object$delta_M) ==
+    expected_matched_patients,
+  nrow(validation_object$matched_metadata) ==
+    expected_matched_patients,
+  nrow(validation_object$retained_annotation) > 0L
+)
+
+rm(validation_object)
 
 cat(
   "\nScript 04 completed successfully.\n"
@@ -1513,8 +1802,16 @@ cat(
 )
 
 cat(
+  "Filtered matrix dimensions:",
+  paste(
+    dim(paired_delta_M),
+    collapse = " x "
+  ),
+  "\n"
+)
+
+cat(
   "Outputs saved to:\n",
   paired_dir,
   "\n"
 )
-
