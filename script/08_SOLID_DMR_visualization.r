@@ -1,65 +1,24 @@
 ############################################################
-## 08_SOLID_DMR_visualization.r
+## 08_SOLID_DMR_finalization.r
 ##
-## SOLID DMR VISUALIZATION + IMPORTANT-REGION PRIORITIZATION
+## SOLID DMR FINALIZATION / DATA LOCK
 ##
-## Input:
-##   result/03_matched_tissue_plasma/DMR/
-##     SOLID_tissue_vs_plasma_DMR_object.rds
+## Purpose:
+##   1. Load Script-07 paired DMR object
+##   2. Recalculate patient-level consistency metrics
+##   3. Define the final SOLID Tier-A region set
+##   4. Build Tier-A multi-window blocks from Tier-A regions ONLY
+##   5. Validate the expected frozen SOLID counts
+##   6. Save canonical final tables/object for downstream integration
 ##
-## Main goals:
-##
-##   1. Visualize paired tumor-plasma DMR results
-##
-##   2. Prioritize biologically compelling regions using:
-##        - FDR
-##        - median Delta Beta
-##        - direction consistency across patients
-##        - recurrent effect consistency
-##        - valid-pair support
-##        - EPIC / plasma technical support when available
-##
-##   3. Generate:
-##        - Volcano plot with labeled important regions
-##        - Effect-size sensitivity summary
-##        - Delta-Beta distribution
-##        - Direction summary
-##        - Effect vs consistency scatter
-##        - Delta-Beta heatmap
-##        - Tumor + Plasma Beta heatmap
-##        - Paired Beta plots for representative regions
-##        - Genome-wide effect-size plot
-##        - High-confidence adjacent DMR blocks
-##
-## IMPORTANT:
-##
-## Script 07 primary DMR:
+## Tier-A definition:
 ##   FDR < 0.05
-##   |median Delta Beta| >= 0.05
+##   |median Delta Beta| >= 0.30
+##   direction consistency = 100%
+##   same-direction |Delta Beta| >= 0.10 in >=80% of patients
+##   valid matched pairs = 13/13
 ##
-## Script 08 visualization/prioritization tiers:
-##
-## STRONG CONSISTENT:
-##   FDR < 0.05
-##   |median Delta Beta| >= 0.20
-##   direction consistency >= 80%
-##
-## MODERATE CONSISTENT:
-##   FDR < 0.05
-##   |median Delta Beta| >= 0.10
-##   direction consistency >= 80%
-##
-## PRIMARY DMR:
-##   FDR < 0.05
-##   |median Delta Beta| >= 0.05
-##
-## Delta Beta:
-##   Plasma - Tumor
-############################################################
-
-
-############################################################
-## 0. CLEAN SESSION
+## Delta Beta = Plasma - Tumor
 ############################################################
 
 rm(list = ls())
@@ -71,633 +30,284 @@ options(
   warn = 1
 )
 
-
-############################################################
-## 1. USER SETTINGS
-############################################################
-
-project_dir <- "C:/solid-methylation"
-
+expected_matched_patients <- 13L
 fdr_threshold <- 0.05
-
-primary_delta_beta_threshold <- 0.05
-
-moderate_delta_beta_threshold <- 0.10
-
-strong_delta_beta_threshold <- 0.20
-
-minimum_direction_consistency <- 80
-
-############################################################
-## Display settings
-############################################################
-
-n_volcano_labels_per_direction <- 8L
-
-n_heatmap_regions_per_direction <- 20L
-
-n_paired_plot_regions_per_direction <- 4L
-
-n_top_table_per_direction <- 1000L
-
-n_top_important_regions <- 200L
-
-
-############################################################
-## Heatmap display
-############################################################
-
-heatmap_clip_delta_beta <- 0.50
-
-
-############################################################
-## Genomic block definition
-##
-## Fixed 1-kb windows are 0-based half-open.
-##
-## gap = 0 means only directly adjacent significant
-## windows are merged.
-############################################################
-
+tierA_abs_delta_beta <- 0.30
+tierA_direction_consistency <- 100
+tierA_effect_consistency_010 <- 80
+tierA_required_valid_pairs <- 13L
 maximum_gap_between_windows <- 0L
-
 minimum_windows_per_block <- 2L
 
+expected_tierA_regions <- 15322L
+expected_tierA_tumor_higher <- 11350L
+expected_tierA_plasma_higher <- 3972L
+expected_tierA_windows_in_multiwindow_blocks <- 4492L
+expected_tierA_multiwindow_blocks <- 2920L
 
-############################################################
-## Volcano display
-############################################################
-
-maximum_minus_log10_FDR_display <- 50
-
-
-############################################################
-## Reproducibility
-############################################################
-
-random_seed <- 20260912L
-
-set.seed(
-  random_seed
-)
-
-
-############################################################
-## 2. REQUIRED PACKAGES
-############################################################
-
-cran_packages <- c(
+required_packages <- c(
   "data.table",
-  "ggplot2",
-  "matrixStats",
-  "scales",
-  "ggrepel",
-  "circlize"
+  "matrixStats"
 )
 
-bioc_packages <- c(
-  "ComplexHeatmap"
-)
-
-
-missing_cran <- cran_packages[
+missing_packages <- required_packages[
   !vapply(
-    cran_packages,
+    required_packages,
     requireNamespace,
     quietly = TRUE,
     FUN.VALUE = logical(1)
   )
 ]
 
-missing_bioc <- bioc_packages[
-  !vapply(
-    bioc_packages,
-    requireNamespace,
-    quietly = TRUE,
-    FUN.VALUE = logical(1)
-  )
-]
-
-
-if (length(missing_cran) > 0L) {
-
+if (length(missing_packages) > 0L) {
   stop(
-    "Missing CRAN package(s): ",
-    paste(
-      missing_cran,
-      collapse = ", "
-    ),
-    "\nInstall with:\ninstall.packages(c(",
-    paste(
-      sprintf(
-        '"%s"',
-        missing_cran
-      ),
-      collapse = ", "
-    ),
-    "))"
+    "Missing package(s): ",
+    paste(missing_packages, collapse = ", ")
   )
 }
-
-
-if (length(missing_bioc) > 0L) {
-
-  stop(
-    "Missing Bioconductor package(s): ",
-    paste(
-      missing_bioc,
-      collapse = ", "
-    ),
-    "\nInstall using BiocManager::install()."
-  )
-}
-
 
 suppressPackageStartupMessages({
-
   library(data.table)
-
-  library(ggplot2)
-
   library(matrixStats)
-
-  library(scales)
-
-  library(ggrepel)
-
-  library(circlize)
-
-  library(ComplexHeatmap)
 })
 
-
-############################################################
-## 3. DIRECTORIES
-############################################################
-
 dmr_dir <- file.path(
-  project_dir,
   "result",
   "03_matched_tissue_plasma",
   "DMR"
 )
 
-
-figure_dir <- file.path(
+final_dir <- file.path(
   dmr_dir,
-  "figures"
+  "final"
 )
-
-
-priority_dir <- file.path(
-  dmr_dir,
-  "prioritization"
-)
-
 
 dir.create(
-  figure_dir,
+  final_dir,
   recursive = TRUE,
   showWarnings = FALSE
 )
-
-
-dir.create(
-  priority_dir,
-  recursive = TRUE,
-  showWarnings = FALSE
-)
-
 
 dmr_object_file <- file.path(
   dmr_dir,
   "SOLID_tissue_vs_plasma_DMR_object.rds"
 )
 
-
 if (!file.exists(dmr_object_file)) {
-
   stop(
-    "DMR object not found:\n",
+    "Script-07 DMR object not found:\n",
     dmr_object_file,
     "\nRun Script 07 first."
   )
 }
 
-
-############################################################
-## 4. HELPER FUNCTIONS
-############################################################
-
 message_header <- function(text) {
-
   cat(
     "\n",
-    paste(
-      rep(
-        "=",
-        72
-      ),
-      collapse = ""
-    ),
+    paste(rep("=", 72), collapse = ""),
     "\n",
     text,
     "\n",
-    paste(
-      rep(
-        "=",
-        72
-      ),
-      collapse = ""
-    ),
+    paste(rep("=", 72), collapse = ""),
     "\n",
     sep = ""
   )
 }
 
-
-save_plot <- function(
-    plot_object,
-    filename,
-    width,
-    height,
-    dpi = 300
-) {
-
-  ggsave(
-    filename = filename,
-    plot = plot_object,
-    width = width,
-    height = height,
-    dpi = dpi,
-    limitsize = FALSE
-  )
-
-  invisible(
-    filename
-  )
-}
-
-
-standardize_chr <- function(x) {
-
-  x <- as.character(x)
-
-  x <- sub(
+standardize_chr_character <- function(x) {
+  sub(
     "^chr",
     "",
-    x,
+    as.character(x),
     ignore.case = TRUE
-  )
-
-
-  factor(
-    x,
-    levels = c(
-      as.character(
-        1:22
-      ),
-      "X",
-      "Y"
-    ),
-    ordered = TRUE
   )
 }
 
-
-############################################################
-## 5. LOAD DMR OBJECT
-############################################################
+chromosome_order <- function(x) {
+  match(
+    standardize_chr_character(x),
+    c(
+      as.character(1:22),
+      "X",
+      "Y"
+    )
+  )
+}
 
 message_header(
-  "LOADING SOLID DMR OBJECT"
+  "LOADING SCRIPT-07 DMR OBJECT"
 )
-
 
 dmr_object <- readRDS(
   dmr_object_file
 )
 
-
 required_elements <- c(
   "all_results",
+  "region_order",
   "delta_beta",
   "tissue_beta",
   "plasma_beta",
   "valid_pair_mask",
-  "patient_metadata"
+  "patient_metadata",
+  "analysis_settings"
 )
-
 
 missing_elements <- setdiff(
   required_elements,
-  names(
-    dmr_object
-  )
+  names(dmr_object)
 )
 
-
 if (length(missing_elements) > 0L) {
-
   stop(
-    "DMR object missing element(s): ",
-    paste(
-      missing_elements,
-      collapse = ", "
-    )
+    "DMR object missing required element(s): ",
+    paste(missing_elements, collapse = ", ")
   )
 }
-
 
 results <- as.data.table(
   dmr_object$all_results
 )
 
+canonical_region_order <- as.character(
+  dmr_object$region_order
+)
 
 delta_beta <- dmr_object$delta_beta
-
 tissue_beta <- dmr_object$tissue_beta
-
 plasma_beta <- dmr_object$plasma_beta
-
 valid_pair_mask <- dmr_object$valid_pair_mask
-
 
 patient_metadata <- as.data.table(
   dmr_object$patient_metadata
 )
 
-
-############################################################
-## 6. VALIDATE INPUT
-############################################################
-
-stopifnot(
-
-  nrow(results) > 0L,
-
-  is.matrix(
-    delta_beta
-  ),
-
-  is.matrix(
-    tissue_beta
-  ),
-
-  is.matrix(
-    plasma_beta
-  ),
-
-  is.matrix(
-    valid_pair_mask
-  ),
-
-  identical(
-    dim(delta_beta),
-    dim(tissue_beta)
-  ),
-
-  identical(
-    dim(delta_beta),
-    dim(plasma_beta)
-  ),
-
-  identical(
-    dim(delta_beta),
-    dim(valid_pair_mask)
-  ),
-
-  ncol(
-    delta_beta
-  ) == 13L,
-
-  nrow(
-    patient_metadata
-  ) == 13L,
-
-  setequal(
-    results$region_id,
-    rownames(
-      delta_beta
-    )
-  )
+message_header(
+  "VALIDATING CANONICAL REGION ORDER"
 )
 
-
-############################################################
-## Restore matrix order
-############################################################
-
-results <- results[
-  match(
-    rownames(
-      delta_beta
-    ),
-    region_id
-  )
-]
-
-
 stopifnot(
+  nrow(results) == length(canonical_region_order),
+  nrow(delta_beta) == length(canonical_region_order),
+  ncol(delta_beta) == expected_matched_patients,
+
   identical(
     results$region_id,
-    rownames(
-      delta_beta
-    )
-  )
-)
+    canonical_region_order
+  ),
 
-
-patient_ids <- colnames(
-  delta_beta
-)
-
-
-stopifnot(
   identical(
-    patient_ids,
+    rownames(delta_beta),
+    canonical_region_order
+  ),
+
+  identical(
+    rownames(tissue_beta),
+    canonical_region_order
+  ),
+
+  identical(
+    rownames(plasma_beta),
+    canonical_region_order
+  ),
+
+  identical(
+    rownames(valid_pair_mask),
+    canonical_region_order
+  ),
+
+  identical(
+    colnames(delta_beta),
+    colnames(tissue_beta)
+  ),
+
+  identical(
+    colnames(delta_beta),
+    colnames(plasma_beta)
+  ),
+
+  identical(
+    colnames(delta_beta),
+    colnames(valid_pair_mask)
+  ),
+
+  identical(
+    colnames(delta_beta),
     patient_metadata$patient_id
   )
 )
 
-
-cat(
-  "Regions loaded:",
-  format(
-    nrow(results),
-    big.mark = ","
-  ),
-  "\n"
+required_result_columns <- c(
+  "region_id",
+  "FDR",
+  "median_delta_beta",
+  "abs_median_delta_beta"
 )
 
-
-cat(
-  "Matched patients:",
-  length(
-    patient_ids
-  ),
-  "\n"
+missing_result_columns <- setdiff(
+  required_result_columns,
+  names(results)
 )
 
+if (length(missing_result_columns) > 0L) {
+  stop(
+    "Script-07 results missing required column(s): ",
+    paste(missing_result_columns, collapse = ", ")
+  )
+}
 
-############################################################
-## 7. CALCULATE PATIENT-LEVEL DIRECTION CONSISTENCY
-############################################################
+cat(
+  "Canonical region-order validation: PASS\n"
+)
+
+cat(
+  "Regions tested: ",
+  format(nrow(results), big.mark = ","),
+  "\n",
+  sep = ""
+)
 
 message_header(
-  "CALCULATING REGION-LEVEL DIRECTION CONSISTENCY"
+  "RECALCULATING CONSISTENCY METRICS"
 )
 
+valid_delta <-
+  valid_pair_mask &
+  is.finite(delta_beta)
 
-############################################################
-## Valid observations
-############################################################
-
-valid_delta <- is.finite(
-  delta_beta
-)
-
-
-n_valid <- rowSums(
+n_valid_pairs_final <- rowSums(
   valid_delta
 )
 
-
-############################################################
-## Sign consistency
-############################################################
-
 n_positive <- rowSums(
-  delta_beta > 0,
+  (delta_beta > 0) &
+    valid_delta,
   na.rm = TRUE
 )
-
 
 n_negative <- rowSums(
-  delta_beta < 0,
+  (delta_beta < 0) &
+    valid_delta,
   na.rm = TRUE
 )
-
-
-############################################################
-## Strong-effect recurrence
-############################################################
 
 n_positive_010 <- rowSums(
-  delta_beta >=
-    moderate_delta_beta_threshold,
+  (delta_beta >= 0.10) &
+    valid_delta,
   na.rm = TRUE
 )
-
 
 n_negative_010 <- rowSums(
-  delta_beta <=
-    -moderate_delta_beta_threshold,
+  (delta_beta <= -0.10) &
+    valid_delta,
   na.rm = TRUE
 )
 
-
-n_positive_020 <- rowSums(
-  delta_beta >=
-    strong_delta_beta_threshold,
-  na.rm = TRUE
-)
-
-
-n_negative_020 <- rowSums(
-  delta_beta <=
-    -strong_delta_beta_threshold,
-  na.rm = TRUE
-)
-
-
-############################################################
-## Direction-specific consistency
-############################################################
-
 results[
   ,
-  direction_consistency_pct :=
-    fifelse(
-      median_delta_beta > 0,
-
-      100 *
-        n_positive /
-        n_valid,
-
-      fifelse(
-        median_delta_beta < 0,
-
-        100 *
-          n_negative /
-          n_valid,
-
-        NA_real_
-      )
-    )
+  n_valid_pairs_final :=
+    n_valid_pairs_final
 ]
-
-
-results[
-  ,
-  effect_consistency_0.10_pct :=
-    fifelse(
-      median_delta_beta > 0,
-
-      100 *
-        n_positive_010 /
-        n_valid,
-
-      fifelse(
-        median_delta_beta < 0,
-
-        100 *
-          n_negative_010 /
-          n_valid,
-
-        NA_real_
-      )
-    )
-]
-
-
-results[
-  ,
-  effect_consistency_0.20_pct :=
-    fifelse(
-      median_delta_beta > 0,
-
-      100 *
-        n_positive_020 /
-        n_valid,
-
-      fifelse(
-        median_delta_beta < 0,
-
-        100 *
-          n_negative_020 /
-          n_valid,
-
-        NA_real_
-      )
-    )
-]
-
-
-############################################################
-## Ensure valid-pair count remains consistent
-############################################################
-
-results[
-  ,
-  n_valid_pairs_visualization :=
-    n_valid
-]
-
-
-############################################################
-## 8. DEFINE REGION DIRECTION
-############################################################
 
 results[
   ,
@@ -713,1502 +323,163 @@ results[
     )
 ]
 
-
-############################################################
-## 9. DEFINE PRIORITIZATION TIERS
-##
-## Do NOT replace Script 07's primary statistical definition.
-## These tiers are for visualization and prioritization.
-############################################################
-
-message_header(
-  "DEFINING IMPORTANT-REGION TIERS"
-)
-
-
 results[
   ,
-  importance_tier :=
+  direction_consistency_pct :=
     fifelse(
-
-      FDR < fdr_threshold &
-
-        abs_median_delta_beta >=
-          strong_delta_beta_threshold &
-
-        direction_consistency_pct >=
-          minimum_direction_consistency,
-
-      "Strong_consistent",
-
+      median_delta_beta > 0,
+      100 *
+        n_positive /
+        n_valid_pairs_final,
       fifelse(
-
-        FDR < fdr_threshold &
-
-          abs_median_delta_beta >=
-            moderate_delta_beta_threshold &
-
-          direction_consistency_pct >=
-            minimum_direction_consistency,
-
-        "Moderate_consistent",
-
-        fifelse(
-
-          FDR < fdr_threshold &
-
-            abs_median_delta_beta >=
-              primary_delta_beta_threshold,
-
-          "Primary_DMR",
-
-          fifelse(
-            FDR <
-              fdr_threshold,
-            "FDR_only",
-            "Not_significant"
-          )
-        )
+        median_delta_beta < 0,
+        100 *
+          n_negative /
+          n_valid_pairs_final,
+        NA_real_
       )
     )
 ]
-
 
 results[
   ,
-  importance_tier :=
-    factor(
-      importance_tier,
-      levels = c(
-        "Strong_consistent",
-        "Moderate_consistent",
-        "Primary_DMR",
-        "FDR_only",
-        "Not_significant"
-      ),
-      ordered = TRUE
-    )
-]
-
-
-############################################################
-## 10. IMPORTANT REGION TABLE
-############################################################
-
-strong_regions <- results[
-  importance_tier ==
-    "Strong_consistent"
-]
-
-
-moderate_regions <- results[
-  importance_tier %in%
-    c(
-      "Strong_consistent",
-      "Moderate_consistent"
-    )
-]
-
-
-############################################################
-## Transparent ranking:
-##
-## 1. stronger recurrent effect across patients
-## 2. larger absolute median Delta Beta
-## 3. stronger direction consistency
-## 4. smaller FDR
-## 5. more valid pairs
-############################################################
-
-setorder(
-  strong_regions,
-  -effect_consistency_0.10_pct,
-  -abs_median_delta_beta,
-  -direction_consistency_pct,
-  FDR,
-  -n_valid_pairs
-)
-
-
-important_regions <- head(
-  strong_regions,
-  n_top_important_regions
-)
-
-
-############################################################
-## Split direction
-############################################################
-
-important_tumor <- strong_regions[
-  DMR_direction ==
-    "Tumor_higher"
-]
-
-
-important_plasma <- strong_regions[
-  DMR_direction ==
-    "Plasma_higher"
-]
-
-
-############################################################
-## 11. SUMMARY OF PRIORITIZATION TIERS
-############################################################
-
-tier_summary <- results[
-  ,
-  .(
-    n_regions = .N
-  ),
-  by = .(
-    importance_tier,
-    DMR_direction
-  )
-]
-
-
-tier_summary[
-  ,
-  percentage_tested :=
-    100 *
-    n_regions /
-    nrow(
-      results
-    )
-]
-
-
-print(
-  tier_summary
-)
-
-
-fwrite(
-  tier_summary,
-  file.path(
-    priority_dir,
-    "SOLID_DMR_importance_tier_summary.tsv"
-  ),
-  sep = "\t"
-)
-
-
-############################################################
-## 12. SAVE PRIORITIZED REGION TABLES
-############################################################
-
-fwrite(
-  results,
-  file.path(
-    priority_dir,
-    "SOLID_all_DMR_results_with_consistency.tsv.gz"
-  ),
-  sep = "\t",
-  compress = "gzip"
-)
-
-
-fwrite(
-  strong_regions,
-  file.path(
-    priority_dir,
-    "SOLID_strong_consistent_DMRs.tsv.gz"
-  ),
-  sep = "\t",
-  compress = "gzip"
-)
-
-
-fwrite(
-  important_regions,
-  file.path(
-    priority_dir,
-    "SOLID_top200_important_DMR_regions.tsv"
-  ),
-  sep = "\t"
-)
-
-
-fwrite(
-  head(
-    important_tumor,
-    n_top_table_per_direction
-  ),
-  file.path(
-    priority_dir,
-    "SOLID_top_tumor_higher_DMRs.tsv"
-  ),
-  sep = "\t"
-)
-
-
-fwrite(
-  head(
-    important_plasma,
-    n_top_table_per_direction
-  ),
-  file.path(
-    priority_dir,
-    "SOLID_top_plasma_higher_DMRs.tsv"
-  ),
-  sep = "\t"
-)
-
-
-############################################################
-## 13. EFFECT-SIZE / CONSISTENCY SENSITIVITY TABLE
-############################################################
-
-effect_thresholds <- c(
-  0.05,
-  0.10,
-  0.20
-)
-
-
-consistency_thresholds <- c(
-  50,
-  70,
-  80,
-  90,
-  100
-)
-
-
-sensitivity_table <- rbindlist(
-  lapply(
-    effect_thresholds,
-    function(effect_cutoff) {
-
-      rbindlist(
-        lapply(
-          consistency_thresholds,
-          function(consistency_cutoff) {
-
-            keep <-
-              results$FDR <
-                fdr_threshold &
-
-              results$abs_median_delta_beta >=
-                effect_cutoff &
-
-              results$direction_consistency_pct >=
-                consistency_cutoff
-
-
-            data.table(
-
-              abs_median_delta_beta =
-                effect_cutoff,
-
-              direction_consistency_pct =
-                consistency_cutoff,
-
-              n_regions =
-                sum(
-                  keep,
-                  na.rm = TRUE
-                ),
-
-              tumor_higher =
-                sum(
-                  keep &
-                    results$DMR_direction ==
-                    "Tumor_higher",
-                  na.rm = TRUE
-                ),
-
-              plasma_higher =
-                sum(
-                  keep &
-                    results$DMR_direction ==
-                    "Plasma_higher",
-                  na.rm = TRUE
-                )
-            )
-          }
-        )
-      )
-    }
-  )
-)
-
-
-fwrite(
-  sensitivity_table,
-  file.path(
-    priority_dir,
-    "SOLID_DMR_effect_consistency_sensitivity.tsv"
-  ),
-  sep = "\t"
-)
-
-
-cat(
-  "\nEffect + consistency sensitivity:\n"
-)
-
-print(
-  sensitivity_table
-)
-
-
-############################################################
-## 14. VOLCANO PLOT WITH TOP IMPORTANT REGIONS LABELED
-############################################################
-
-message_header(
-  "CREATING LABELED VOLCANO PLOT"
-)
-
-
-results[
-  ,
-  minus_log10_FDR :=
-    -log10(
-      pmax(
-        FDR,
-        .Machine$double.xmin
+  effect_consistency_0.10_pct :=
+    fifelse(
+      median_delta_beta > 0,
+      100 *
+        n_positive_010 /
+        n_valid_pairs_final,
+      fifelse(
+        median_delta_beta < 0,
+        100 *
+          n_negative_010 /
+          n_valid_pairs_final,
+        NA_real_
       )
     )
 ]
 
-
-results[
-  ,
-  minus_log10_FDR_display :=
-    pmin(
-      minus_log10_FDR,
-      maximum_minus_log10_FDR_display
+if ("n_valid_pairs" %in% names(results)) {
+  if (
+    !identical(
+      as.integer(results$n_valid_pairs),
+      as.integer(results$n_valid_pairs_final)
     )
-]
-
-
-############################################################
-## Select labels separately by direction
-############################################################
-
-volcano_labels <- rbindlist(
-  list(
-
-    head(
-      important_tumor,
-      n_volcano_labels_per_direction
-    ),
-
-    head(
-      important_plasma,
-      n_volcano_labels_per_direction
+  ) {
+    stop(
+      "Recalculated n_valid_pairs does not match Script-07 n_valid_pairs."
     )
-  ),
-  use.names = TRUE,
-  fill = TRUE
-)
-
-
-volcano_labels[
-  ,
-  minus_log10_FDR_display :=
-    pmin(
-      -log10(
-        pmax(
-          FDR,
-          .Machine$double.xmin
-        )
-      ),
-      maximum_minus_log10_FDR_display
-    )
-]
-
-
-volcano_plot <- ggplot(
-  results,
-  aes(
-    x = median_delta_beta,
-    y = minus_log10_FDR_display
-  )
-) +
-
-  geom_point(
-    data = results[
-      importance_tier %in%
-        c(
-          "Not_significant",
-          "FDR_only"
-        )
-    ],
-    alpha = 0.15,
-    size = 0.35,
-    colour = "grey70"
-  ) +
-
-  geom_point(
-    data = results[
-      importance_tier ==
-        "Primary_DMR"
-    ],
-    alpha = 0.20,
-    size = 0.40,
-    colour = "grey45"
-  ) +
-
-  geom_point(
-    data = results[
-      importance_tier ==
-        "Moderate_consistent"
-    ],
-    aes(
-      colour = DMR_direction
-    ),
-    alpha = 0.40,
-    size = 0.50
-  ) +
-
-  geom_point(
-    data = results[
-      importance_tier ==
-        "Strong_consistent"
-    ],
-    aes(
-      colour = DMR_direction
-    ),
-    alpha = 0.65,
-    size = 0.70
-  ) +
-
-  geom_vline(
-    xintercept = c(
-      -strong_delta_beta_threshold,
-      strong_delta_beta_threshold
-    ),
-    linetype = 2
-  ) +
-
-  geom_hline(
-    yintercept =
-      min(
-        -log10(
-          fdr_threshold
-        ),
-        maximum_minus_log10_FDR_display
-      ),
-    linetype = 2
-  ) +
-
-  ggrepel::geom_text_repel(
-    data = volcano_labels,
-    aes(
-      label = region_id
-    ),
-    size = 3,
-    max.overlaps = Inf,
-    box.padding = 0.35,
-    point.padding = 0.20,
-    min.segment.length = 0
-  ) +
-
-  scale_colour_manual(
-    values = c(
-      "Tumor_higher" =
-        "#2166AC",
-      "Plasma_higher" =
-        "#B2182B"
-    )
-  ) +
-
-  labs(
-    title =
-      "SOLID tumor–plasma differential methylation",
-    subtitle = paste0(
-      "Strong consistent regions: FDR < 0.05, |median Δβ| ≥ ",
-      strong_delta_beta_threshold,
-      ", direction consistency ≥ ",
-      minimum_direction_consistency,
-      "%\nΔβ = Plasma - Tumor"
-    ),
-    x =
-      "Median Δβ (Plasma - Tumor)",
-    y =
-      paste0(
-        "-log10(FDR), capped at ",
-        maximum_minus_log10_FDR_display
-      ),
-    colour =
-      "Direction"
-  ) +
-
-  theme_bw(
-    base_size = 12
-  ) +
-
-  theme(
-    legend.position = "top",
-    plot.title =
-      element_text(
-        face = "bold"
-      )
-  )
-
-
-save_plot(
-  volcano_plot,
-  file.path(
-    figure_dir,
-    "SOLID_DMR_volcano_important_regions.png"
-  ),
-  width = 12,
-  height = 8
-)
-
-
-ggsave(
-  file.path(
-    figure_dir,
-    "SOLID_DMR_volcano_important_regions.pdf"
-  ),
-  volcano_plot,
-  width = 12,
-  height = 8
-)
-
-
-############################################################
-## 15. DELTA-BETA DISTRIBUTION
-############################################################
-
-delta_distribution <- ggplot(
-  results,
-  aes(
-    x = median_delta_beta
-  )
-) +
-
-  geom_histogram(
-    bins = 150,
-    fill = "grey55",
-    colour = "white",
-    linewidth = 0.1
-  ) +
-
-  geom_vline(
-    xintercept = c(
-      -0.05,
-      0.05
-    ),
-    linetype = 3
-  ) +
-
-  geom_vline(
-    xintercept = c(
-      -0.10,
-      0.10
-    ),
-    linetype = 2
-  ) +
-
-  geom_vline(
-    xintercept = c(
-      -0.20,
-      0.20
-    ),
-    linewidth = 0.7
-  ) +
-
-  labs(
-    title =
-      "Distribution of SOLID paired methylation effects",
-    subtitle =
-      "Reference lines at |Δβ| = 0.05, 0.10 and 0.20",
-    x =
-      "Median Δβ (Plasma - Tumor)",
-    y =
-      "Number of regions"
-  ) +
-
-  theme_bw(
-    base_size = 12
-  )
-
-
-save_plot(
-  delta_distribution,
-  file.path(
-    figure_dir,
-    "SOLID_DMR_delta_beta_distribution.png"
-  ),
-  width = 10,
-  height = 7
-)
-
-
-############################################################
-## 16. STRONG-CANDIDATE DIRECTION SUMMARY
-############################################################
-
-direction_summary <- strong_regions[
-  ,
-  .(
-    n_regions = .N
-  ),
-  by = DMR_direction
-]
-
-
-direction_summary[
-  ,
-  percentage :=
-    100 *
-    n_regions /
-    sum(
-      n_regions
-    )
-]
-
-
-direction_plot <- ggplot(
-  direction_summary,
-  aes(
-    x = DMR_direction,
-    y = n_regions,
-    fill = DMR_direction
-  )
-) +
-
-  geom_col(
-    width = 0.65
-  ) +
-
-  geom_text(
-    aes(
-      label = paste0(
-        comma(
-          n_regions
-        ),
-        "\n",
-        sprintf(
-          "%.1f%%",
-          percentage
-        )
-      )
-    ),
-    vjust = -0.3
-  ) +
-
-  scale_fill_manual(
-    values = c(
-      "Tumor_higher" =
-        "#2166AC",
-      "Plasma_higher" =
-        "#B2182B"
-    )
-  ) +
-
-  scale_y_continuous(
-    labels = comma,
-    expand = expansion(
-      mult = c(
-        0,
-        0.15
-      )
-    )
-  ) +
-
-  labs(
-    title =
-      "Direction of strong consistent SOLID DMRs",
-    subtitle = paste0(
-      "|median Δβ| ≥ ",
-      strong_delta_beta_threshold,
-      " and consistency ≥ ",
-      minimum_direction_consistency,
-      "%"
-    ),
-    x = NULL,
-    y =
-      "Number of regions"
-  ) +
-
-  theme_bw(
-    base_size = 12
-  ) +
-
-  theme(
-    legend.position = "none"
-  )
-
-
-save_plot(
-  direction_plot,
-  file.path(
-    figure_dir,
-    "SOLID_DMR_strong_candidate_direction.png"
-  ),
-  width = 8,
-  height = 6
-)
-
-
-############################################################
-## 17. EFFECT SIZE vs DIRECTION CONSISTENCY
-##
-## This is one of the most useful prioritization figures.
-############################################################
-
-effect_consistency_plot <- ggplot(
-  results[
-    FDR <
-      fdr_threshold &
-      abs_median_delta_beta >=
-      primary_delta_beta_threshold
-  ],
-  aes(
-    x = median_delta_beta,
-    y = direction_consistency_pct,
-    colour = DMR_direction
-  )
-) +
-
-  geom_point(
-    alpha = 0.25,
-    size = 0.7
-  ) +
-
-  geom_hline(
-    yintercept =
-      minimum_direction_consistency,
-    linetype = 2
-  ) +
-
-  geom_vline(
-    xintercept = c(
-      -strong_delta_beta_threshold,
-      strong_delta_beta_threshold
-    ),
-    linetype = 2
-  ) +
-
-  ggrepel::geom_text_repel(
-    data = volcano_labels,
-    aes(
-      label = region_id
-    ),
-    size = 3,
-    max.overlaps = Inf,
-    min.segment.length = 0
-  ) +
-
-  scale_colour_manual(
-    values = c(
-      "Tumor_higher" =
-        "#2166AC",
-      "Plasma_higher" =
-        "#B2182B"
-    )
-  ) +
-
-  coord_cartesian(
-    ylim = c(
-      0,
-      100
-    )
-  ) +
-
-  labs(
-    title =
-      "SOLID DMR effect size and patient consistency",
-    subtitle =
-      "Upper outer quadrants identify large and recurrent effects",
-    x =
-      "Median Δβ (Plasma - Tumor)",
-    y =
-      "Direction consistency across matched patients (%)",
-    colour =
-      "Direction"
-  ) +
-
-  theme_bw(
-    base_size = 12
-  ) +
-
-  theme(
-    legend.position = "top"
-  )
-
-
-save_plot(
-  effect_consistency_plot,
-  file.path(
-    figure_dir,
-    "SOLID_DMR_effect_vs_direction_consistency.png"
-  ),
-  width = 11,
-  height = 8
-)
-
-
-############################################################
-## 18. SELECT REPRESENTATIVE IMPORTANT REGIONS
-############################################################
-
-message_header(
-  "SELECTING REPRESENTATIVE IMPORTANT REGIONS"
-)
-
-
-top_tumor_regions <- head(
-  important_tumor,
-  n_heatmap_regions_per_direction
-)
-
-
-top_plasma_regions <- head(
-  important_plasma,
-  n_heatmap_regions_per_direction
-)
-
-
-top_heatmap_regions <- rbindlist(
-  list(
-    top_tumor_regions,
-    top_plasma_regions
-  ),
-  use.names = TRUE,
-  fill = TRUE
-)
-
-
-top_heatmap_regions <- top_heatmap_regions[
-  !duplicated(
-    region_id
-  )
-]
-
-
-if (nrow(top_heatmap_regions) < 2L) {
-
-  stop(
-    "Too few important regions for heatmap generation."
-  )
+  }
 }
 
-
-fwrite(
-  top_heatmap_regions,
-  file.path(
-    priority_dir,
-    "SOLID_representative_important_DMRs.tsv"
-  ),
-  sep = "\t"
-)
-
-
-############################################################
-## 19. DELTA-BETA HEATMAP
-############################################################
-
 message_header(
-  "CREATING DELTA-BETA HEATMAP"
+  "DEFINING FINAL SOLID TIER-A REGIONS"
 )
 
-
-heatmap_idx <- match(
-  top_heatmap_regions$region_id,
-  rownames(
-    delta_beta
-  )
-)
-
-
-stopifnot(
-  !anyNA(
-    heatmap_idx
-  )
-)
-
-
-delta_heatmap <- delta_beta[
-  heatmap_idx,
+results[
   ,
-  drop = FALSE
+  TierA :=
+    FDR < fdr_threshold &
+    abs_median_delta_beta >=
+      tierA_abs_delta_beta &
+    direction_consistency_pct >=
+      tierA_direction_consistency &
+    effect_consistency_0.10_pct >=
+      tierA_effect_consistency_010 &
+    n_valid_pairs_final ==
+      tierA_required_valid_pairs
 ]
 
-
-delta_heatmap_display <- pmax(
-  pmin(
-    delta_heatmap,
-    heatmap_clip_delta_beta
-  ),
-  -heatmap_clip_delta_beta
-)
-
-
-rownames(
-  delta_heatmap_display
-) <- top_heatmap_regions$region_id
-
-
-############################################################
-## Patient annotation
-############################################################
-
-patient_annotation <- as.data.frame(
-  patient_metadata[
-    ,
-    intersect(
-      c(
-        "Grade",
-        "Sex",
-        "ECOG",
-        "Response_RANO"
-      ),
-      names(
-        patient_metadata
-      )
-    ),
-    with = FALSE
+tierA <- copy(
+  results[
+    TierA == TRUE
   ]
 )
 
+tierA_tumor <- copy(
+  tierA[
+    DMR_direction ==
+      "Tumor_higher"
+  ]
+)
 
-rownames(
-  patient_annotation
-) <- patient_metadata$patient_id
+tierA_plasma <- copy(
+  tierA[
+    DMR_direction ==
+      "Plasma_higher"
+  ]
+)
 
+observed_tierA_regions <- nrow(
+  tierA
+)
 
-patient_annotation <- patient_annotation[
-  patient_ids,
-  ,
-  drop = FALSE
-]
+observed_tierA_tumor <- nrow(
+  tierA_tumor
+)
 
+observed_tierA_plasma <- nrow(
+  tierA_plasma
+)
 
-heatmap_colours <- circlize::colorRamp2(
-  c(
-    -heatmap_clip_delta_beta,
-    0,
-    heatmap_clip_delta_beta
-  ),
-  c(
-    "#2166AC",
-    "white",
-    "#B2182B"
+cat(
+  "Tier-A regions: ",
+  format(observed_tierA_regions, big.mark = ","),
+  "\n",
+  sep = ""
+)
+
+cat(
+  "  Tumor higher: ",
+  format(observed_tierA_tumor, big.mark = ","),
+  "\n",
+  sep = ""
+)
+
+cat(
+  "  Plasma higher: ",
+  format(observed_tierA_plasma, big.mark = ","),
+  "\n",
+  sep = ""
+)
+
+if (observed_tierA_regions != expected_tierA_regions) {
+  stop(
+    "Tier-A region count mismatch. Expected ",
+    expected_tierA_regions,
+    "; observed ",
+    observed_tierA_regions,
+    "."
   )
-)
+}
 
-
-row_split <- factor(
-  top_heatmap_regions$DMR_direction,
-  levels = c(
-    "Tumor_higher",
-    "Plasma_higher"
+if (observed_tierA_tumor != expected_tierA_tumor_higher) {
+  stop(
+    "Tier-A tumor-higher count mismatch. Expected ",
+    expected_tierA_tumor_higher,
+    "; observed ",
+    observed_tierA_tumor,
+    "."
   )
+}
+
+if (observed_tierA_plasma != expected_tierA_plasma_higher) {
+  stop(
+    "Tier-A plasma-higher count mismatch. Expected ",
+    expected_tierA_plasma_higher,
+    "; observed ",
+    observed_tierA_plasma,
+    "."
+  )
+}
+
+cat(
+  "Tier-A count validation: PASS\n"
 )
-
-
-delta_heatmap_object <- ComplexHeatmap::Heatmap(
-
-  delta_heatmap_display,
-
-  name =
-    "Δβ",
-
-  col =
-    heatmap_colours,
-
-  row_split =
-    row_split,
-
-  top_annotation =
-    ComplexHeatmap::HeatmapAnnotation(
-      df =
-        patient_annotation
-    ),
-
-  cluster_rows =
-    TRUE,
-
-  cluster_columns =
-    TRUE,
-
-  show_row_names =
-    TRUE,
-
-  show_column_names =
-    TRUE,
-
-  row_names_gp =
-    grid::gpar(
-      fontsize = 6
-    ),
-
-  column_names_rot =
-    45,
-
-  column_title =
-    "SOLID within-patient Δβ",
-
-  na_col =
-    "grey90",
-
-  heatmap_legend_param =
-    list(
-      title =
-        "Plasma - Tumor"
-    )
-)
-
-
-png(
-  file.path(
-    figure_dir,
-    "SOLID_DMR_important_regions_delta_beta_heatmap.png"
-  ),
-  width = 3000,
-  height = 2600,
-  res = 300
-)
-
-
-ComplexHeatmap::draw(
-  delta_heatmap_object,
-  heatmap_legend_side = "right",
-  annotation_legend_side = "right"
-)
-
-
-dev.off()
-
-
-pdf(
-  file.path(
-    figure_dir,
-    "SOLID_DMR_important_regions_delta_beta_heatmap.pdf"
-  ),
-  width = 11,
-  height = 10
-)
-
-
-ComplexHeatmap::draw(
-  delta_heatmap_object,
-  heatmap_legend_side = "right",
-  annotation_legend_side = "right"
-)
-
-
-dev.off()
-
-
-############################################################
-## 20. ACTUAL TUMOR + PLASMA BETA HEATMAP
-##
-## This complements the Delta-Beta heatmap and shows the
-## actual methylation state in each sample.
-############################################################
 
 message_header(
-  "CREATING TUMOR + PLASMA BETA HEATMAP"
+  "BUILDING TIER-A MULTI-WINDOW BLOCKS"
 )
-
-
-tissue_heatmap <- tissue_beta[
-  heatmap_idx,
-  ,
-  drop = FALSE
-]
-
-
-plasma_heatmap <- plasma_beta[
-  heatmap_idx,
-  ,
-  drop = FALSE
-]
-
-
-beta_heatmap <- cbind(
-  tissue_heatmap,
-  plasma_heatmap
-)
-
-
-colnames(
-  beta_heatmap
-) <- c(
-  paste0(
-    "Tumor_",
-    patient_ids
-  ),
-  paste0(
-    "Plasma_",
-    patient_ids
-  )
-)
-
-
-rownames(
-  beta_heatmap
-) <- top_heatmap_regions$region_id
-
-
-############################################################
-## 26-column annotation
-############################################################
-
-sample_annotation <- data.frame(
-
-  Sample_Type = c(
-    rep(
-      "Tumor",
-      length(
-        patient_ids
-      )
-    ),
-    rep(
-      "Plasma",
-      length(
-        patient_ids
-      )
-    )
-  ),
-
-  Grade = rep(
-    patient_metadata$Grade,
-    2
-  ),
-
-  Sex = rep(
-    patient_metadata$Sex,
-    2
-  ),
-
-  ECOG = rep(
-    patient_metadata$ECOG,
-    2
-  ),
-
-  stringsAsFactors = FALSE
-)
-
-
-rownames(
-  sample_annotation
-) <- colnames(
-  beta_heatmap
-)
-
-
-beta_colours <- circlize::colorRamp2(
-  c(
-    0,
-    0.5,
-    1
-  ),
-  c(
-    "#2166AC",
-    "white",
-    "#B2182B"
-  )
-)
-
-
-beta_heatmap_object <- ComplexHeatmap::Heatmap(
-
-  beta_heatmap,
-
-  name =
-    "Beta",
-
-  col =
-    beta_colours,
-
-  top_annotation =
-    ComplexHeatmap::HeatmapAnnotation(
-      df =
-        sample_annotation
-    ),
-
-  column_split =
-    factor(
-      sample_annotation$Sample_Type,
-      levels = c(
-        "Tumor",
-        "Plasma"
-      )
-    ),
-
-  cluster_rows =
-    TRUE,
-
-  cluster_columns =
-    TRUE,
-
-  show_row_names =
-    TRUE,
-
-  show_column_names =
-    TRUE,
-
-  row_names_gp =
-    grid::gpar(
-      fontsize = 6
-    ),
-
-  column_names_gp =
-    grid::gpar(
-      fontsize = 7
-    ),
-
-  column_names_rot =
-    45,
-
-  column_title =
-    "SOLID important DMRs: actual regional Beta values"
-)
-
-
-png(
-  file.path(
-    figure_dir,
-    "SOLID_DMR_important_regions_tumor_plasma_beta_heatmap.png"
-  ),
-  width = 3600,
-  height = 2800,
-  res = 300
-)
-
-
-ComplexHeatmap::draw(
-  beta_heatmap_object,
-  heatmap_legend_side = "right",
-  annotation_legend_side = "right"
-)
-
-
-dev.off()
-
-
-pdf(
-  file.path(
-    figure_dir,
-    "SOLID_DMR_important_regions_tumor_plasma_beta_heatmap.pdf"
-  ),
-  width = 14,
-  height = 10
-)
-
-
-ComplexHeatmap::draw(
-  beta_heatmap_object,
-  heatmap_legend_side = "right",
-  annotation_legend_side = "right"
-)
-
-
-dev.off()
-
-
-############################################################
-## 21. TOP-REGION PAIRED BETA PLOTS
-############################################################
-
-message_header(
-  "CREATING TOP-REGION PAIRED BETA PLOTS"
-)
-
-
-top_paired_regions <- rbindlist(
-  list(
-
-    head(
-      important_tumor,
-      n_paired_plot_regions_per_direction
-    ),
-
-    head(
-      important_plasma,
-      n_paired_plot_regions_per_direction
-    )
-  ),
-  use.names = TRUE,
-  fill = TRUE
-)
-
-
-top_paired_regions <- top_paired_regions[
-  !duplicated(
-    region_id
-  )
-]
-
-
-paired_plot_data <- rbindlist(
-  lapply(
-    seq_len(
-      nrow(
-        top_paired_regions
-      )
-    ),
-    function(i) {
-
-      region_id_i <-
-        top_paired_regions$region_id[i]
-
-
-      matrix_row <- match(
-        region_id_i,
-        rownames(
-          tissue_beta
-        )
-      )
-
-
-      data.table(
-
-        region_id =
-          rep(
-            region_id_i,
-            2 *
-              length(
-                patient_ids
-              )
-          ),
-
-        patient_id =
-          rep(
-            patient_ids,
-            2
-          ),
-
-        sample_type =
-          rep(
-            c(
-              "Tumor",
-              "Plasma"
-            ),
-            each =
-              length(
-                patient_ids
-              )
-          ),
-
-        beta =
-          c(
-            as.numeric(
-              tissue_beta[
-                matrix_row,
-              ]
-            ),
-            as.numeric(
-              plasma_beta[
-                matrix_row,
-              ]
-            )
-          )
-      )
-    }
-  )
-)
-
-
-paired_plot_data[
-  ,
-  sample_type :=
-    factor(
-      sample_type,
-      levels = c(
-        "Tumor",
-        "Plasma"
-      )
-    )
-]
-
-
-paired_plot <- ggplot(
-  paired_plot_data,
-  aes(
-    x = sample_type,
-    y = beta,
-    group = patient_id
-  )
-) +
-
-  geom_line(
-    alpha = 0.45,
-    colour = "grey50"
-  ) +
-
-  geom_point(
-    size = 1.8
-  ) +
-
-  facet_wrap(
-    ~region_id,
-    ncol = 2
-  ) +
-
-  coord_cartesian(
-    ylim = c(
-      0,
-      1
-    )
-  ) +
-
-  labs(
-    title =
-      "Representative high-confidence SOLID DMRs",
-    subtitle =
-      "Each line connects matched tumor and plasma from one patient",
-    x = NULL,
-    y =
-      "Regional Beta value"
-  ) +
-
-  theme_bw(
-    base_size = 10
-  ) +
-
-  theme(
-    strip.text =
-      element_text(
-        face = "bold",
-        size = 8
-      )
-  )
-
-
-save_plot(
-  paired_plot,
-  file.path(
-    figure_dir,
-    "SOLID_DMR_important_regions_paired_beta.png"
-  ),
-  width = 12,
-  height = 13
-)
-
-
-fwrite(
-  paired_plot_data,
-  file.path(
-    priority_dir,
-    "SOLID_DMR_important_regions_paired_beta_values.tsv"
-  ),
-  sep = "\t"
-)
-
-
-############################################################
-## 22. GENOME-WIDE EFFECT-SIZE PLOT
-##
-## More informative here than significance alone because
-## a very large fraction of regions are FDR significant.
-############################################################
-
-message_header(
-  "CREATING GENOME-WIDE EFFECT-SIZE PLOT"
-)
-
 
 required_coordinate_columns <- c(
   "chr",
@@ -2216,575 +487,481 @@ required_coordinate_columns <- c(
   "end"
 )
 
+missing_coordinate_columns <- setdiff(
+  required_coordinate_columns,
+  names(tierA)
+)
 
-if (
-  all(
-    required_coordinate_columns %in%
-      names(
-        results
-      )
+if (length(missing_coordinate_columns) > 0L) {
+  stop(
+    "Tier-A table missing genomic coordinate column(s): ",
+    paste(missing_coordinate_columns, collapse = ", ")
   )
-) {
+}
 
-
-  genome_data <- copy(
-    results
+block_input <- tierA[
+  !is.na(chr) &
+    !is.na(start) &
+    !is.na(end),
+  .(
+    region_id,
+    chr =
+      standardize_chr_character(chr),
+    start =
+      as.integer(start),
+    end =
+      as.integer(end),
+    DMR_direction =
+      as.character(DMR_direction),
+    FDR,
+    median_delta_beta,
+    abs_median_delta_beta,
+    direction_consistency_pct,
+    effect_consistency_0.10_pct,
+    n_valid_pairs_final
   )
+]
 
+block_input[
+  ,
+  chr_order :=
+    chromosome_order(chr)
+]
 
-  genome_data[
-    ,
-    chr_plot :=
-      standardize_chr(
-        chr
-      )
-  ]
+block_input <- block_input[
+  !is.na(chr_order)
+]
 
+setorder(
+  block_input,
+  chr_order,
+  DMR_direction,
+  start,
+  end
+)
 
-  genome_data <- genome_data[
-    !is.na(
-      chr_plot
-    ) &
-      !is.na(
-        start
-      )
-  ]
-
-
-  genome_data[
-    ,
-    chr_numeric :=
-      as.integer(
-        chr_plot
-      )
-  ]
-
-
-  chromosome_sizes <- genome_data[
-    ,
-    .(
-      chromosome_end =
-        max(
-          end,
-          na.rm = TRUE
-        )
+block_input[
+  ,
+  previous_end :=
+    shift(
+      end
     ),
-    by = .(
-      chr_plot,
-      chr_numeric
-    )
-  ]
-
-
-  setorder(
-    chromosome_sizes,
-    chr_numeric
-  )
-
-
-  chromosome_sizes[
-    ,
-    cumulative_offset :=
-      c(
-        0,
-        head(
-          cumsum(
-            chromosome_end
-          ),
-          -1L
-        )
-      )
-  ]
-
-
-  genome_data <- merge(
-    genome_data,
-    chromosome_sizes[
-      ,
-      .(
-        chr_plot,
-        cumulative_offset
-      )
-    ],
-    by = "chr_plot",
-    all.x = TRUE,
-    sort = FALSE
-  )
-
-
-  genome_data[
-    ,
-    genomic_position :=
-      start +
-      cumulative_offset
-  ]
-
-
-  chromosome_centres <- genome_data[
-    ,
-    .(
-      centre =
-        (
-          min(
-            genomic_position
-          ) +
-            max(
-              genomic_position
-            )
-        ) /
-        2
-    ),
-    by = chr_plot
-  ]
-
-
-  chromosome_centres[
-    ,
-    chr_numeric :=
-      as.integer(
-        chr_plot
-      )
-  ]
-
-
-  setorder(
-    chromosome_centres,
-    chr_numeric
-  )
-
-
-  genome_effect_plot <- ggplot(
-    genome_data,
-    aes(
-      x = genomic_position,
-      y = median_delta_beta
-    )
-  ) +
-
-    geom_point(
-      data = genome_data[
-        importance_tier !=
-          "Strong_consistent"
-      ],
-      alpha = 0.15,
-      size = 0.30,
-      colour = "grey65"
-    ) +
-
-    geom_point(
-      data = genome_data[
-        importance_tier ==
-          "Strong_consistent"
-      ],
-      aes(
-        colour = DMR_direction
-      ),
-      alpha = 0.70,
-      size = 0.55
-    ) +
-
-    geom_hline(
-      yintercept = 0,
-      linetype = 2
-    ) +
-
-    geom_hline(
-      yintercept = c(
-        -strong_delta_beta_threshold,
-        strong_delta_beta_threshold
-      ),
-      linetype = 3
-    ) +
-
-    scale_colour_manual(
-      values = c(
-        "Tumor_higher" =
-          "#2166AC",
-        "Plasma_higher" =
-          "#B2182B"
-      )
-    ) +
-
-    scale_x_continuous(
-      breaks =
-        chromosome_centres$centre,
-      labels =
-        as.character(
-          chromosome_centres$chr_plot
-        )
-    ) +
-
-    labs(
-      title =
-        "Genome-wide SOLID tumor–plasma methylation effects",
-      subtitle =
-        "Strong consistent DMRs highlighted",
-      x =
-        "Chromosome",
-      y =
-        "Median Δβ (Plasma - Tumor)",
-      colour =
-        "Direction"
-    ) +
-
-    theme_bw(
-      base_size = 11
-    ) +
-
-    theme(
-      panel.grid.major.x =
-        element_blank(),
-      legend.position =
-        "top"
-    )
-
-
-  save_plot(
-    genome_effect_plot,
-    file.path(
-      figure_dir,
-      "SOLID_DMR_genomewide_effect_size.png"
-    ),
-    width = 16,
-    height = 7
-  )
-
-
-  ############################################################
-  ## 23. MERGE ADJACENT STRONG CONSISTENT WINDOWS
-  ##
-  ## Only same-direction high-confidence windows are merged.
-  ############################################################
-
-  message_header(
-    "MERGING ADJACENT STRONG CONSISTENT WINDOWS"
-  )
-
-
-  block_input <- strong_regions[
-    !is.na(
-      chr
-    ) &
-      !is.na(
-        start
-      ) &
-      !is.na(
-        end
-      ),
-    .(
-      region_id,
-      chr =
-        as.character(
-          chr
-        ),
-      start =
-        as.integer(
-          start
-        ),
-      end =
-        as.integer(
-          end
-        ),
-      FDR,
-      median_delta_beta,
-      mean_delta_beta,
-      direction_consistency_pct,
-      effect_consistency_0.10_pct,
-      DMR_direction
-    )
-  ]
-
-
-  setorder(
-    block_input,
+  by = .(
     chr,
-    DMR_direction,
-    start,
-    end
+    DMR_direction
   )
+]
 
-
-  block_input[
-    ,
-    previous_end :=
-      shift(
-        end
-      ),
-    by = .(
-      chr,
-      DMR_direction
-    )
-  ]
-
-
-  block_input[
-    ,
-    new_block :=
-      is.na(
+block_input[
+  ,
+  new_block :=
+    is.na(previous_end) |
+    (
+      start -
         previous_end
-      ) |
-        (
-          start -
-            previous_end
-        ) >
-        maximum_gap_between_windows,
-    by = .(
-      chr,
-      DMR_direction
-    )
-  ]
+    ) >
+    maximum_gap_between_windows,
+  by = .(
+    chr,
+    DMR_direction
+  )
+]
 
+block_input[
+  ,
+  block_number :=
+    cumsum(
+      new_block
+    ),
+  by = .(
+    chr,
+    DMR_direction
+  )
+]
 
+block_key <- unique(
   block_input[
-    ,
-    block_number :=
-      cumsum(
-        new_block
-      ),
-    by = .(
-      chr,
-      DMR_direction
-    )
-  ]
-
-
-  dmr_blocks <- block_input[
     ,
     .(
-
-      block_start =
-        min(
-          start
-        ),
-
-      block_end =
-        max(
-          end
-        ),
-
-      ########################################################
-      ## Coordinates are half-open:
-      ## width = end - start
-      ########################################################
-
-      block_width =
-        max(
-          end
-        ) -
-        min(
-          start
-        ),
-
-      n_windows =
-        .N,
-
-      minimum_FDR =
-        min(
-          FDR,
-          na.rm = TRUE
-        ),
-
-      median_region_delta_beta =
-        median(
-          median_delta_beta,
-          na.rm = TRUE
-        ),
-
-      maximum_absolute_region_delta_beta =
-        max(
-          abs(
-            median_delta_beta
-          ),
-          na.rm = TRUE
-        ),
-
-      median_direction_consistency_pct =
-        median(
-          direction_consistency_pct,
-          na.rm = TRUE
-        ),
-
-      median_effect_consistency_0.10_pct =
-        median(
-          effect_consistency_0.10_pct,
-          na.rm = TRUE
-        ),
-
-      first_region_id =
-        first(
-          region_id
-        ),
-
-      last_region_id =
-        last(
-          region_id
-        )
-
-    ),
-    by = .(
+      chr_order,
       chr,
       DMR_direction,
       block_number
     )
   ]
-
-
-  dmr_blocks[
-    ,
-    retained_block :=
-      n_windows >=
-      minimum_windows_per_block
-  ]
-
-
-  retained_blocks <- dmr_blocks[
-    retained_block ==
-      TRUE
-  ]
-
-
-  if (nrow(retained_blocks) > 0L) {
-
-    retained_blocks[
-      ,
-      block_id :=
-        paste0(
-          "SOLID_DMR_BLOCK_",
-          sprintf(
-            "%05d",
-            seq_len(
-              .N
-            )
-          )
-        )
-    ]
-
-
-    setcolorder(
-      retained_blocks,
-      c(
-        "block_id",
-        setdiff(
-          names(
-            retained_blocks
-          ),
-          "block_id"
-        )
-      )
-    )
-
-
-    setorder(
-      retained_blocks,
-      -n_windows,
-      -maximum_absolute_region_delta_beta,
-      minimum_FDR
-    )
-  }
-
-
-  fwrite(
-    dmr_blocks,
-    file.path(
-      priority_dir,
-      "SOLID_all_strong_consistent_DMR_blocks.tsv.gz"
-    ),
-    sep = "\t",
-    compress = "gzip"
-  )
-
-
-  fwrite(
-    retained_blocks,
-    file.path(
-      priority_dir,
-      "SOLID_retained_multiwindow_DMR_blocks.tsv"
-    ),
-    sep = "\t"
-  )
-
-
-  cat(
-    "\nStrong candidate regions:",
-    format(
-      nrow(
-        strong_regions
-      ),
-      big.mark = ","
-    ),
-    "\n"
-  )
-
-
-  cat(
-    "Merged blocks:",
-    format(
-      nrow(
-        dmr_blocks
-      ),
-      big.mark = ","
-    ),
-    "\n"
-  )
-
-
-  cat(
-    "Multi-window retained blocks:",
-    format(
-      nrow(
-        retained_blocks
-      ),
-      big.mark = ","
-    ),
-    "\n"
-  )
-
-} else {
-
-  warning(
-    "chr/start/end columns missing: genome-wide plot and block merging skipped."
-  )
-
-  retained_blocks <- data.table()
-}
-
-
-############################################################
-## 24. FINAL IMPORTANT-REGION SUMMARY
-############################################################
-
-message_header(
-  "IMPORTANT REGION SUMMARY"
 )
 
+setorder(
+  block_key,
+  chr_order,
+  DMR_direction,
+  block_number
+)
 
-important_summary <- data.table(
+block_key[
+  ,
+  block_id :=
+    paste0(
+      "SOLID_TIERA_BLOCK_",
+      sprintf(
+        "%05d",
+        seq_len(.N)
+      )
+    )
+]
 
+block_input <- merge(
+  block_input,
+  block_key,
+  by = c(
+    "chr_order",
+    "chr",
+    "DMR_direction",
+    "block_number"
+  ),
+  all.x = TRUE,
+  sort = FALSE
+)
+
+setorder(
+  block_input,
+  chr_order,
+  DMR_direction,
+  start,
+  end
+)
+
+tierA_blocks <- block_input[
+  ,
+  .(
+    block_start =
+      min(start),
+
+    block_end =
+      max(end),
+
+    block_width =
+      max(end) -
+      min(start),
+
+    n_windows =
+      .N,
+
+    minimum_FDR =
+      min(
+        FDR,
+        na.rm = TRUE
+      ),
+
+    median_region_delta_beta =
+      median(
+        median_delta_beta,
+        na.rm = TRUE
+      ),
+
+    maximum_absolute_region_delta_beta =
+      max(
+        abs_median_delta_beta,
+        na.rm = TRUE
+      ),
+
+    median_effect_consistency_0.10_pct =
+      median(
+        effect_consistency_0.10_pct,
+        na.rm = TRUE
+      ),
+
+    first_region_id =
+      first(region_id),
+
+    last_region_id =
+      last(region_id)
+  ),
+  by = .(
+    block_id,
+    chr_order,
+    chr,
+    DMR_direction
+  )
+]
+
+tierA_blocks[
+  ,
+  retained_multiwindow :=
+    n_windows >=
+    minimum_windows_per_block
+]
+
+tierA_retained_blocks <- copy(
+  tierA_blocks[
+    retained_multiwindow == TRUE
+  ]
+)
+
+setorder(
+  tierA_blocks,
+  chr_order,
+  block_start,
+  DMR_direction
+)
+
+setorder(
+  tierA_retained_blocks,
+  chr_order,
+  block_start,
+  DMR_direction
+)
+
+retained_block_ids <- tierA_retained_blocks$block_id
+
+tierA_block_members <- block_input[
+  block_id %in%
+    retained_block_ids,
+  .(
+    block_id,
+    region_id,
+    chr,
+    start,
+    end,
+    DMR_direction,
+    median_delta_beta,
+    FDR,
+    direction_consistency_pct,
+    effect_consistency_0.10_pct,
+    n_valid_pairs_final
+  )
+]
+
+setorder(
+  tierA_block_members,
+  chr,
+  start,
+  DMR_direction
+)
+
+observed_member_windows <- nrow(
+  tierA_block_members
+)
+
+observed_retained_blocks <- nrow(
+  tierA_retained_blocks
+)
+
+cat(
+  "Tier-A windows in retained multi-window blocks: ",
+  format(observed_member_windows, big.mark = ","),
+  "\n",
+  sep = ""
+)
+
+cat(
+  "Tier-A retained multi-window blocks: ",
+  format(observed_retained_blocks, big.mark = ","),
+  "\n",
+  sep = ""
+)
+
+if (
+  observed_member_windows !=
+    expected_tierA_windows_in_multiwindow_blocks
+) {
+  stop(
+    "Tier-A block-member count mismatch. Expected ",
+    expected_tierA_windows_in_multiwindow_blocks,
+    "; observed ",
+    observed_member_windows,
+    "."
+  )
+}
+
+if (
+  observed_retained_blocks !=
+    expected_tierA_multiwindow_blocks
+) {
+  stop(
+    "Tier-A retained-block count mismatch. Expected ",
+    expected_tierA_multiwindow_blocks,
+    "; observed ",
+    observed_retained_blocks,
+    "."
+  )
+}
+
+cat(
+  "Tier-A block validation: PASS\n"
+)
+
+tierA[
+  ,
+  `:=`(
+    in_multiwindow_block =
+      region_id %in%
+      tierA_block_members$region_id,
+
+    block_id =
+      NA_character_,
+
+    block_n_windows =
+      NA_integer_,
+
+    block_width =
+      NA_integer_
+  )
+]
+
+if (nrow(tierA_block_members) > 0L) {
+
+  member_map <- merge(
+    tierA_block_members[
+      ,
+      .(
+        block_id,
+        region_id
+      )
+    ],
+    tierA_retained_blocks[
+      ,
+      .(
+        block_id,
+        block_n_windows =
+          n_windows,
+        block_width
+      )
+    ],
+    by = "block_id",
+    all.x = TRUE,
+    sort = FALSE
+  )
+
+  tierA[
+    member_map,
+    on = "region_id",
+    `:=`(
+      block_id =
+        i.block_id,
+      block_n_windows =
+        i.block_n_windows,
+      block_width =
+        i.block_width
+    )
+  ]
+}
+
+tierA[
+  ,
+  block_supported_rank :=
+    as.integer(
+      in_multiwindow_block
+    )
+]
+
+technical_columns <- intersect(
+  c(
+    "n_EPIC_probes",
+    "median_plasma_coverage",
+    "median_plasma_covered_cpgs"
+  ),
+  names(tierA)
+)
+
+tierA[
+  ,
+  EPIC_probe_rank :=
+    if (
+      "n_EPIC_probes" %in%
+        names(tierA)
+    ) {
+      fifelse(
+        is.na(n_EPIC_probes),
+        0,
+        pmin(
+          n_EPIC_probes,
+          10
+        )
+      )
+    } else {
+      0
+    }
+]
+
+tierA[
+  ,
+  plasma_cpg_rank :=
+    if (
+      "median_plasma_covered_cpgs" %in%
+        names(tierA)
+    ) {
+      fifelse(
+        is.na(median_plasma_covered_cpgs),
+        0,
+        median_plasma_covered_cpgs
+      )
+    } else {
+      0
+    }
+]
+
+tierA[
+  ,
+  plasma_coverage_rank :=
+    if (
+      "median_plasma_coverage" %in%
+        names(tierA)
+    ) {
+      fifelse(
+        is.na(median_plasma_coverage),
+        0,
+        median_plasma_coverage
+      )
+    } else {
+      0
+    }
+]
+
+setorder(
+  tierA,
+  -block_supported_rank,
+  -effect_consistency_0.10_pct,
+  -abs_median_delta_beta,
+  -EPIC_probe_rank,
+  -plasma_cpg_rank,
+  -plasma_coverage_rank,
+  FDR
+)
+
+tierA[
+  ,
+  TierA_rank :=
+    seq_len(.N)
+]
+
+tierA_tumor <- copy(
+  tierA[
+    DMR_direction ==
+      "Tumor_higher"
+  ]
+)
+
+tierA_plasma <- copy(
+  tierA[
+    DMR_direction ==
+      "Plasma_higher"
+  ]
+)
+
+final_summary <- data.table(
   item = c(
-
     "regions_tested",
-
-    "FDR_significant",
-
-    "primary_DMR_FDR_and_absDeltaBeta_0.05",
-
-    "moderate_consistent_absDeltaBeta_0.10_consistency_80",
-
-    "strong_consistent_absDeltaBeta_0.20_consistency_80",
-
-    "strong_consistent_tumor_higher",
-
-    "strong_consistent_plasma_higher",
-
-    "retained_multiwindow_blocks"
-
+    "FDR_significant_regions",
+    "TierA_regions",
+    "TierA_tumor_higher",
+    "TierA_plasma_higher",
+    "TierA_windows_in_multiwindow_blocks",
+    "TierA_retained_multiwindow_blocks"
   ),
 
   value = c(
-
-    nrow(
-      results
-    ),
+    nrow(results),
 
     sum(
       results$FDR <
@@ -2792,269 +969,331 @@ important_summary <- data.table(
       na.rm = TRUE
     ),
 
-    sum(
-      results$FDR <
-        fdr_threshold &
-        results$abs_median_delta_beta >=
-        primary_delta_beta_threshold,
-      na.rm = TRUE
-    ),
+    nrow(tierA),
 
-    sum(
-      results$FDR <
-        fdr_threshold &
-        results$abs_median_delta_beta >=
-        moderate_delta_beta_threshold &
-        results$direction_consistency_pct >=
-        minimum_direction_consistency,
-      na.rm = TRUE
-    ),
+    nrow(tierA_tumor),
 
-    nrow(
-      strong_regions
-    ),
+    nrow(tierA_plasma),
 
-    nrow(
-      important_tumor
-    ),
+    nrow(tierA_block_members),
 
-    nrow(
-      important_plasma
-    ),
-
-    nrow(
-      retained_blocks
-    )
+    nrow(tierA_retained_blocks)
   )
 )
 
+genome_build_value <- dmr_object$analysis_settings[
+  setting == "genome_build",
+  value
+][1]
 
-print(
-  important_summary
+final_settings <- data.table(
+  setting = c(
+    "source_script",
+    "source_DMR_object",
+    "delta_beta_definition",
+    "FDR_threshold",
+    "TierA_abs_median_delta_beta_threshold",
+    "TierA_direction_consistency_pct",
+    "TierA_effect_consistency_0.10_pct",
+    "TierA_required_valid_pairs",
+    "coordinate_convention",
+    "maximum_gap_between_windows",
+    "minimum_windows_per_block",
+    "block_input_population",
+    "genome_build"
+  ),
+
+  value = c(
+    "08_SOLID_DMR_finalization.r",
+    dmr_object_file,
+    "plasma_minus_tumor",
+    fdr_threshold,
+    tierA_abs_delta_beta,
+    tierA_direction_consistency,
+    tierA_effect_consistency_010,
+    tierA_required_valid_pairs,
+    "0_based_half_open",
+    maximum_gap_between_windows,
+    minimum_windows_per_block,
+    "TierA_regions_only",
+    as.character(genome_build_value)
+  )
 )
 
+message_header(
+  "SAVING FINAL SOLID DMR DATA LOCK"
+)
 
 fwrite(
-  important_summary,
+  results,
   file.path(
-    priority_dir,
-    "SOLID_DMR_important_region_summary.tsv"
+    final_dir,
+    "SOLID_DMR_all_regions_final.tsv.gz"
+  ),
+  sep = "\t",
+  compress = "gzip"
+)
+
+fwrite(
+  tierA,
+  file.path(
+    final_dir,
+    "SOLID_TierA_regions.tsv.gz"
+  ),
+  sep = "\t",
+  compress = "gzip"
+)
+
+fwrite(
+  tierA_tumor,
+  file.path(
+    final_dir,
+    "SOLID_TierA_tumor_higher.tsv.gz"
+  ),
+  sep = "\t",
+  compress = "gzip"
+)
+
+fwrite(
+  tierA_plasma,
+  file.path(
+    final_dir,
+    "SOLID_TierA_plasma_higher.tsv.gz"
+  ),
+  sep = "\t",
+  compress = "gzip"
+)
+
+fwrite(
+  tierA_blocks,
+  file.path(
+    final_dir,
+    "SOLID_TierA_all_blocks.tsv.gz"
+  ),
+  sep = "\t",
+  compress = "gzip"
+)
+
+fwrite(
+  tierA_retained_blocks,
+  file.path(
+    final_dir,
+    "SOLID_TierA_retained_multiwindow_blocks.tsv"
   ),
   sep = "\t"
 )
 
-
-############################################################
-## 25. FINAL VALIDATION
-############################################################
-
-required_figures <- c(
-
-  "SOLID_DMR_volcano_important_regions.png",
-
-  "SOLID_DMR_delta_beta_distribution.png",
-
-  "SOLID_DMR_strong_candidate_direction.png",
-
-  "SOLID_DMR_effect_vs_direction_consistency.png",
-
-  "SOLID_DMR_important_regions_delta_beta_heatmap.png",
-
-  "SOLID_DMR_important_regions_tumor_plasma_beta_heatmap.png",
-
-  "SOLID_DMR_important_regions_paired_beta.png"
-)
-
-
-missing_figures <- required_figures[
-  !file.exists(
-    file.path(
-      figure_dir,
-      required_figures
-    )
-  )
-]
-
-
-if (length(missing_figures) > 0L) {
-
-  stop(
-    "Missing expected figure(s):\n",
-    paste(
-      missing_figures,
-      collapse = "\n"
-    )
-  )
-}
-
-
-############################################################
-## 26. FINAL CONSOLE SUMMARY
-############################################################
-
-cat(
-  "\n============================================\n"
-)
-
-cat(
-  "SOLID DMR VISUALIZATION COMPLETE\n"
-)
-
-cat(
-  "============================================\n"
-)
-
-
-cat(
-  "\nRegions tested:",
-  format(
-    nrow(
-      results
-    ),
-    big.mark = ","
+fwrite(
+  tierA_block_members,
+  file.path(
+    final_dir,
+    "SOLID_TierA_block_members.tsv.gz"
   ),
-  "\n"
+  sep = "\t",
+  compress = "gzip"
 )
 
+fwrite(
+  final_summary,
+  file.path(
+    final_dir,
+    "SOLID_DMR_final_summary.tsv"
+  ),
+  sep = "\t"
+)
 
-cat(
-  "FDR-significant:",
-  format(
-    sum(
-      results$FDR <
+fwrite(
+  final_settings,
+  file.path(
+    final_dir,
+    "SOLID_DMR_final_settings.tsv"
+  ),
+  sep = "\t"
+)
+
+final_object <- list(
+  all_results =
+    results,
+
+  TierA_regions =
+    tierA,
+
+  TierA_tumor_higher =
+    tierA_tumor,
+
+  TierA_plasma_higher =
+    tierA_plasma,
+
+  TierA_all_blocks =
+    tierA_blocks,
+
+  TierA_retained_blocks =
+    tierA_retained_blocks,
+
+  TierA_block_members =
+    tierA_block_members,
+
+  region_order =
+    canonical_region_order,
+
+  delta_beta =
+    delta_beta,
+
+  tissue_beta =
+    tissue_beta,
+
+  plasma_beta =
+    plasma_beta,
+
+  valid_pair_mask =
+    valid_pair_mask,
+
+  patient_metadata =
+    patient_metadata,
+
+  final_summary =
+    final_summary,
+
+  final_settings =
+    final_settings,
+
+  provenance = list(
+    source_DMR_object =
+      dmr_object_file,
+
+    source_script =
+      "08_SOLID_DMR_finalization.r",
+
+    source_statistical_script =
+      "07_SOLID_paired_DMR.r",
+
+    TierA_definition =
+      paste0(
+        "FDR<",
         fdr_threshold,
-      na.rm = TRUE
-    ),
-    big.mark = ","
+        "; abs_median_delta_beta>=",
+        tierA_abs_delta_beta,
+        "; direction_consistency_pct>=",
+        tierA_direction_consistency,
+        "; effect_consistency_0.10_pct>=",
+        tierA_effect_consistency_010,
+        "; n_valid_pairs==",
+        tierA_required_valid_pairs
+      ),
+
+    block_definition =
+      paste0(
+        "TierA only; same chromosome; same direction; ",
+        "0-based half-open windows; maximum gap=",
+        maximum_gap_between_windows,
+        "; minimum windows=",
+        minimum_windows_per_block
+      ),
+
+    creation_date =
+      as.character(
+        Sys.Date()
+      )
+  )
+)
+
+final_object_file <- file.path(
+  final_dir,
+  "SOLID_DMR_final_object.rds"
+)
+
+saveRDS(
+  final_object,
+  final_object_file
+)
+
+validation_object <- readRDS(
+  final_object_file
+)
+
+stopifnot(
+  identical(
+    validation_object$region_order,
+    validation_object$all_results$region_id
   ),
-  "\n"
-)
 
-
-cat(
-  "\nPrimary DMRs |Δβ| >= 0.05:",
-  format(
-    sum(
-      results$FDR <
-        fdr_threshold &
-        results$abs_median_delta_beta >=
-        0.05,
-      na.rm = TRUE
-    ),
-    big.mark = ","
-  ),
-  "\n"
-)
-
-
-cat(
-  "Moderate consistent DMRs:",
-  format(
-    sum(
-      results$FDR <
-        fdr_threshold &
-        results$abs_median_delta_beta >=
-        0.10 &
-        results$direction_consistency_pct >=
-        minimum_direction_consistency,
-      na.rm = TRUE
-    ),
-    big.mark = ","
-  ),
-  "\n"
-)
-
-
-cat(
-  "Strong consistent DMRs:",
-  format(
-    nrow(
-      strong_regions
-    ),
-    big.mark = ","
-  ),
-  "\n"
-)
-
-
-cat(
-  "  Tumor higher:",
-  format(
-    nrow(
-      important_tumor
-    ),
-    big.mark = ","
-  ),
-  "\n"
-)
-
-
-cat(
-  "  Plasma higher:",
-  format(
-    nrow(
-      important_plasma
-    ),
-    big.mark = ","
-  ),
-  "\n"
-)
-
-
-cat(
-  "\nDirection consistency among strong DMRs:\n"
-)
-
-
-if (nrow(strong_regions) > 0L) {
-
-  print(
-    summary(
-      strong_regions$direction_consistency_pct
+  identical(
+    validation_object$region_order,
+    rownames(
+      validation_object$delta_beta
     )
+  ),
+
+  nrow(
+    validation_object$TierA_regions
+  ) ==
+    expected_tierA_regions,
+
+  nrow(
+    validation_object$TierA_tumor_higher
+  ) ==
+    expected_tierA_tumor_higher,
+
+  nrow(
+    validation_object$TierA_plasma_higher
+  ) ==
+    expected_tierA_plasma_higher,
+
+  nrow(
+    validation_object$TierA_block_members
+  ) ==
+    expected_tierA_windows_in_multiwindow_blocks,
+
+  nrow(
+    validation_object$TierA_retained_blocks
+  ) ==
+    expected_tierA_multiwindow_blocks
+)
+
+rm(
+  validation_object
+)
+
+message_header(
+  "SOLID DMR DATA LOCK PASSED"
+)
+
+print(
+  final_summary
+)
+
+cat(
+  "\nTechnical-support columns available in Tier-A table:\n"
+)
+
+if (length(technical_columns) > 0L) {
+  print(
+    technical_columns
+  )
+} else {
+  cat(
+    "None of the optional technical-support columns were present.\n"
   )
 }
 
-
 cat(
-  "\n0.10-effect consistency among strong DMRs:\n"
-)
-
-
-if (nrow(strong_regions) > 0L) {
-
-  print(
-    summary(
-      strong_regions$effect_consistency_0.10_pct
-    )
-  )
-}
-
-
-cat(
-  "\nFigures:\n",
-  figure_dir,
+  "\nCanonical final object:\n",
+  final_object_file,
   "\n",
   sep = ""
 )
 
-
 cat(
-  "\nPrioritization tables:\n",
-  priority_dir,
+  "\nFinal output directory:\n",
+  final_dir,
   "\n",
   sep = ""
 )
-
-
-############################################################
-## 27. SESSION INFORMATION
-############################################################
 
 capture.output(
   sessionInfo(),
   file = file.path(
-    dmr_dir,
-    "sessionInfo_08_SOLID_DMR_visualization.txt"
+    final_dir,
+    "sessionInfo_08_SOLID_DMR_finalization.txt"
   )
 )
