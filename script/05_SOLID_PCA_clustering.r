@@ -7,11 +7,11 @@
 ## Purpose:
 ##   1. Load frozen downstream analysis-ready object
 ##   2. Use M-values for multivariate structure
-##   3. Apply the existing valid-pair mask
+##   3. Apply existing valid-pair mask
 ##   4. Select complete regions across all 26 samples
 ##   5. Rank complete regions by variance
 ##   6. PCA on top 10,000 variable regions
-##   7. Sample correlation + hierarchical clustering
+##   7. Sample Spearman correlation + hierarchical clustering
 ##   8. Heatmap of top 500 variable regions
 ##   9. Annotate with:
 ##        Grade
@@ -105,6 +105,41 @@ if (!file.exists(plot_style_file)) {
 source(
   plot_style_file
 )
+
+
+############################################################
+## Validate shared plotting objects
+############################################################
+
+required_plot_objects <- c(
+  "sample_cols",
+  "grade_cols",
+  "correlation_palette",
+  "diverging_methylation_palette",
+  "theme_project"
+)
+
+
+missing_plot_objects <- required_plot_objects[
+  !vapply(
+    required_plot_objects,
+    exists,
+    quietly = TRUE,
+    FUN.VALUE = logical(1)
+  )
+]
+
+
+if (length(missing_plot_objects) > 0L) {
+
+  stop(
+    "Missing shared plotting object(s): ",
+    paste(
+      missing_plot_objects,
+      collapse = ", "
+    )
+  )
+}
 
 
 ############################################################
@@ -214,9 +249,11 @@ make_annotation_palette <- function(
     )
   )
 
+
   values <- sort(
     values
   )
+
 
   if (length(values) == 0L) {
     return(NULL)
@@ -252,15 +289,10 @@ obj <- readRDS(
 
 
 cat(
-  "\n============================================\n"
-)
-
-cat(
-  "SOLID PCA + CLUSTERING\n"
-)
-
-cat(
-  "============================================\n"
+  "\n============================================\n",
+  "SOLID PCA + CLUSTERING\n",
+  "============================================\n",
+  sep = ""
 )
 
 
@@ -355,7 +387,7 @@ cat(
 
 
 ############################################################
-## 7. KEEP SELECTED CLINICAL ANNOTATIONS ONLY
+## 7. SELECT CLINICAL ANNOTATIONS
 ############################################################
 
 annotation_variables <- c(
@@ -393,10 +425,6 @@ patient_annotation <- patient_metadata[
   drop = FALSE
 ]
 
-
-############################################################
-## Convert annotation variables to factors
-############################################################
 
 for (v in annotation_variables) {
 
@@ -559,10 +587,6 @@ stopifnot(
 )
 
 
-############################################################
-## Save analysis sample metadata
-############################################################
-
 write.table(
   sample_metadata,
   file.path(
@@ -600,23 +624,25 @@ n_complete_regions <- sum(
 
 
 cat(
-  "\nComplete regions across all 26 samples:",
+  "\nComplete regions across all 26 samples: ",
   n_complete_regions,
-  "of",
+  " of ",
   nrow(combined_M),
-  "\n"
+  "\n",
+  sep = ""
 )
 
 
 cat(
-  "Complete-region percentage:",
+  "Complete-region percentage: ",
   round(
     100 *
       n_complete_regions /
       nrow(combined_M),
     2
   ),
-  "%\n"
+  "%\n",
+  sep = ""
 )
 
 
@@ -765,6 +791,8 @@ write.table(
 
 ############################################################
 ## 15. PCA
+##
+## Samples are observations.
 ############################################################
 
 pca_fit <- prcomp(
@@ -912,13 +940,12 @@ p1 <- ggplot(
   ) +
 
   scale_color_manual(
-    values =
-      sample_cols[
-        c(
-          "Tumor",
-          "Plasma"
-        )
-      ]
+    values = sample_cols[
+      c(
+        "Tumor",
+        "Plasma"
+      )
+    ]
   ) +
 
   labs(
@@ -987,13 +1014,12 @@ p2 <- ggplot(
   ) +
 
   scale_color_manual(
-    values =
-      sample_cols[
-        c(
-          "Tumor",
-          "Plasma"
-        )
-      ]
+    values = sample_cols[
+      c(
+        "Tumor",
+        "Plasma"
+      )
+    ]
   ) +
 
   labs(
@@ -1030,11 +1056,10 @@ save_plot(
 ############################################################
 ## 19. CLINICAL ANNOTATION COLORS
 ##
-## Grade is fixed by the shared project palette.
+## Grade is fixed in 00_plot_style_and_palettes.r.
 ##
-## Sex, ECOG and Response_RANO are generated from observed
-## values here. Once their exact levels are confirmed, these
-## mappings can be moved into 00_plot_style_and_palettes.r.
+## Sex, ECOG and Response_RANO are assigned muted colors
+## from their observed factor levels.
 ############################################################
 
 sex_cols <- make_annotation_palette(
@@ -1293,9 +1318,7 @@ save_plot(
 
 
 ############################################################
-## 24. SAMPLE CORRELATION
-##
-## Spearman correlation over top variable regions.
+## 24. SAMPLE SPEARMAN CORRELATION
 ############################################################
 
 sample_cor <- cor(
@@ -1318,7 +1341,67 @@ write.table(
 
 
 ############################################################
-## 25. HEATMAP ANNOTATION
+## 25. CORRELATION COLOR SCALE
+##
+## Spearman mathematically ranges from -1 to +1, but this
+## heatmap uses the actual observed SOLID correlation range.
+##
+## Colors:
+##   lower observed correlation = blue
+##   middle observed correlation = off-white
+##   higher observed correlation = muted red/clay
+############################################################
+
+cor_min <- min(
+  sample_cor,
+  na.rm = TRUE
+)
+
+
+cor_max <- max(
+  sample_cor,
+  na.rm = TRUE
+)
+
+
+cor_mid <- (
+  cor_min +
+    cor_max
+) / 2
+
+
+cor_breaks <- c(
+
+  seq(
+    cor_min,
+    cor_mid,
+    length.out = 51
+  ),
+
+  seq(
+    cor_mid,
+    cor_max,
+    length.out = 51
+  )[-1]
+)
+
+
+cat(
+  "\nSpearman correlation range:\n"
+)
+
+
+print(
+  c(
+    minimum = cor_min,
+    midpoint = cor_mid,
+    maximum = cor_max
+  )
+)
+
+
+############################################################
+## 26. HEATMAP ANNOTATION
 ############################################################
 
 heatmap_annotation <- sample_metadata[
@@ -1343,11 +1426,6 @@ rownames(
 heatmap_annotation$sample_key <- NULL
 
 
-############################################################
-## Drop patient_id intentionally.
-## Only selected annotations are shown.
-############################################################
-
 for (v in names(heatmap_annotation)) {
 
   heatmap_annotation[[v]] <- factor(
@@ -1357,7 +1435,7 @@ for (v in names(heatmap_annotation)) {
 
 
 ############################################################
-## 26. HEATMAP ANNOTATION COLORS
+## 27. HEATMAP ANNOTATION COLORS
 ############################################################
 
 grade_heatmap_cols <- grade_cols[
@@ -1373,6 +1451,7 @@ grade_heatmap_cols <- grade_cols[
 heatmap_annotation_colors <- list(
 
   sample_type = c(
+
     Tumor =
       unname(
         sample_cols["Tumor"]
@@ -1399,36 +1478,7 @@ heatmap_annotation_colors <- list(
 
 
 ############################################################
-## Shared heatmap color gradient
-############################################################
-
-cor_heatmap_colors <- grDevices::colorRampPalette(
-  c(
-    "#F4F1EA",
-    "#BEB59C",
-    "#697878",
-    "#4B5A69"
-  )
-)(
-  100
-)
-
-
-methylation_heatmap_colors <- grDevices::colorRampPalette(
-  c(
-    "#526A83",
-    "#BABAAF",
-    "#F4F1EA",
-    "#D9AF6B",
-    "#BF816B"
-  )
-)(
-  101
-)
-
-
-############################################################
-## 27. SAMPLE CORRELATION HEATMAP
+## 28. SAMPLE CORRELATION HEATMAP
 ############################################################
 
 pdf(
@@ -1445,7 +1495,10 @@ pheatmap(
   sample_cor,
 
   color =
-    cor_heatmap_colors,
+    correlation_palette,
+
+  breaks =
+    cor_breaks,
 
   annotation_col =
     heatmap_annotation,
@@ -1495,7 +1548,10 @@ pheatmap(
   sample_cor,
 
   color =
-    cor_heatmap_colors,
+    correlation_palette,
+
+  breaks =
+    cor_breaks,
 
   annotation_col =
     heatmap_annotation,
@@ -1531,10 +1587,14 @@ dev.off()
 
 
 ############################################################
-## 28. VARIABLE-REGION HEATMAP
+## 29. VARIABLE-REGION HEATMAP
 ##
-## Row-standardize M-values to emphasize relative
-## methylation patterns rather than absolute M-value scale.
+## Row-standardize M-values.
+##
+## Interpretation:
+##   blue = relatively lower methylation
+##   white = row average
+##   red/clay = relatively higher methylation
 ############################################################
 
 row_mean <- rowMeans(
@@ -1585,7 +1645,29 @@ heatmap_z <- heatmap_z[
 
 
 ############################################################
-## 29. TOP-VARIABLE-REGION HEATMAP
+## Symmetric Z-score breaks
+############################################################
+
+z_limit <- max(
+  abs(
+    heatmap_z
+  ),
+  na.rm = TRUE
+)
+
+
+z_breaks <- seq(
+  -z_limit,
+  z_limit,
+  length.out =
+    length(
+      diverging_methylation_palette
+    ) + 1L
+)
+
+
+############################################################
+## 30. TOP-VARIABLE-REGION HEATMAP
 ############################################################
 
 pdf(
@@ -1602,7 +1684,10 @@ pheatmap(
   heatmap_z,
 
   color =
-    methylation_heatmap_colors,
+    diverging_methylation_palette,
+
+  breaks =
+    z_breaks,
 
   annotation_col =
     heatmap_annotation,
@@ -1651,7 +1736,10 @@ pheatmap(
   heatmap_z,
 
   color =
-    methylation_heatmap_colors,
+    diverging_methylation_palette,
+
+  breaks =
+    z_breaks,
 
   annotation_col =
     heatmap_annotation,
@@ -1686,9 +1774,7 @@ dev.off()
 
 
 ############################################################
-## 30. HIERARCHICAL CLUSTER MEMBERSHIP
-##
-## Save exploratory 2-cluster and 3-cluster solutions.
+## 31. HIERARCHICAL CLUSTER MEMBERSHIP
 ############################################################
 
 sample_distance <- as.dist(
@@ -1767,7 +1853,7 @@ write.table(
 
 
 ############################################################
-## 31. SAVE PCA OBJECT
+## 32. SAVE PCA OBJECT
 ############################################################
 
 saveRDS(
@@ -1780,47 +1866,46 @@ saveRDS(
 
 
 ############################################################
-## 32. FINAL SUMMARY
+## 33. FINAL SUMMARY
 ############################################################
 
 cat(
-  "\n============================================\n"
-)
-
-cat(
-  "SOLID PCA + CLUSTERING COMPLETE\n"
-)
-
-cat(
-  "============================================\n"
+  "\n============================================\n",
+  "SOLID PCA + CLUSTERING COMPLETE\n",
+  "============================================\n",
+  sep = ""
 )
 
 
 cat(
-  "\nTotal retained regions:",
+  "\nTotal retained regions: ",
   nrow(combined_M),
-  "\n"
+  "\n",
+  sep = ""
 )
 
 
 cat(
-  "Complete regions across all 26 samples:",
+  "Complete regions across all 26 samples: ",
   n_complete_regions,
-  "\n"
+  "\n",
+  sep = ""
 )
 
 
 cat(
-  "Regions used for PCA/correlation:",
+  "Regions used for PCA/correlation: ",
   n_pca_regions,
-  "\n"
+  "\n",
+  sep = ""
 )
 
 
 cat(
-  "Regions used for heatmap:",
+  "Regions used for heatmap: ",
   nrow(heatmap_z),
-  "\n"
+  "\n",
+  sep = ""
 )
 
 
@@ -1830,32 +1915,49 @@ cat(
 
 
 cat(
-  "PC1:",
+  "PC1: ",
   round(
     variance_explained[1],
     2
   ),
-  "%\n"
+  "%\n",
+  sep = ""
 )
 
 
 cat(
-  "PC2:",
+  "PC2: ",
   round(
     variance_explained[2],
     2
   ),
-  "%\n"
+  "%\n",
+  sep = ""
 )
 
 
 cat(
-  "PC3:",
+  "PC3: ",
   round(
     variance_explained[3],
     2
   ),
-  "%\n"
+  "%\n",
+  sep = ""
+)
+
+
+cat(
+  "\nSpearman correlation range:\n"
+)
+
+
+print(
+  c(
+    minimum = cor_min,
+    midpoint = cor_mid,
+    maximum = cor_max
+  )
 )
 
 
@@ -1870,17 +1972,6 @@ cat(
     collapse = ", "
   ),
   "\n"
-)
-
-
-cat(
-  "\nPCA sample coordinates:\n",
-  file.path(
-    table_dir,
-    "SOLID_PCA_sample_coordinates.tsv"
-  ),
-  "\n",
-  sep = ""
 )
 
 
@@ -1901,7 +1992,7 @@ cat(
 
 
 ############################################################
-## 33. SESSION INFORMATION
+## 34. SESSION INFORMATION
 ############################################################
 
 capture.output(

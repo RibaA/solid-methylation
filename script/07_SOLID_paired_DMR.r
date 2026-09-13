@@ -1,48 +1,43 @@
 ############################################################
 ## 07_SOLID_paired_DMR.r
 ##
-## SOLID MATCHED TUMOR–PLASMA PAIRED DMR ANALYSIS
+## SOLID MATCHED TUMOR-PLASMA PAIRED DMR ANALYSIS
 ##
 ## Biological comparison:
 ##   Matched tumor EPIC vs plasma 5-base methylation
 ##
 ## Statistical strategy:
-##   - Input regions were frozen in Script 02
-##   - Downstream object and clinical metadata validated
-##     in Script 03
-##   - For each matched patient:
+##   - Input regions frozen upstream
+##   - Within-patient:
 ##
 ##       Delta M = Plasma M - Tumor M
 ##
-##   - Intercept-only limma model tests whether mean
-##     within-patient Delta M differs from zero
+##   - Intercept-only limma model tests:
+##
+##       H0: mean Delta M = 0
 ##
 ## Biological effect size:
 ##
 ##       Delta Beta = Plasma Beta - Tumor Beta
 ##
-##   Positive Delta Beta:
-##       Plasma higher methylation
+## Positive Delta Beta:
+##   Plasma higher methylation
 ##
-##   Negative Delta Beta:
-##       Tumor higher methylation
+## Negative Delta Beta:
+##   Tumor higher methylation
 ##
-## Primary candidate DMR definition:
+## Primary statistical DMR definition:
 ##
 ##   FDR < 0.05
 ##   AND
 ##   |median Delta Beta| >= 0.05
 ##
-## Additional effect-size sensitivity:
-##
-##   |median Delta Beta| >= 0.05
-##   |median Delta Beta| >= 0.10
-##   |median Delta Beta| >= 0.20
-##
 ## IMPORTANT:
-##   - Existing valid_pair_mask is explicitly respected
+##   - Existing valid_pair_mask is respected
 ##   - Minimum valid matched pairs = 10
-##   - No additional sample or region QC is performed here
+##   - No additional QC
+##   - No Tier-A definition here
+##   - Canonical RDS preserves original matrix/region order
 ############################################################
 
 
@@ -63,8 +58,6 @@ options(
 ############################################################
 ## 1. USER SETTINGS
 ############################################################
-
-project_dir <- "C:/solid-methylation"
 
 expected_matched_patients <- 13L
 
@@ -95,6 +88,7 @@ required_packages <- c(
   "matrixStats"
 )
 
+
 missing_packages <- required_packages[
   !vapply(
     required_packages,
@@ -104,6 +98,7 @@ missing_packages <- required_packages[
   )
 ]
 
+
 if (length(missing_packages) > 0L) {
 
   stop(
@@ -111,11 +106,10 @@ if (length(missing_packages) > 0L) {
     paste(
       missing_packages,
       collapse = ", "
-    ),
-    "\nInstall CRAN packages with install.packages() ",
-    "and Bioconductor packages with BiocManager::install()."
+    )
   )
 }
+
 
 suppressPackageStartupMessages({
   library(data.table)
@@ -125,11 +119,10 @@ suppressPackageStartupMessages({
 
 
 ############################################################
-## 3. DIRECTORIES
+## 3. INPUT / OUTPUT DIRECTORIES
 ############################################################
 
 input_file <- file.path(
-  project_dir,
   "result",
   "03_matched_tissue_plasma",
   "SOLID_downstream_analysis_ready.rds"
@@ -137,7 +130,6 @@ input_file <- file.path(
 
 
 dmr_dir <- file.path(
-  project_dir,
   "result",
   "03_matched_tissue_plasma",
   "DMR"
@@ -392,13 +384,28 @@ stopifnot(
 
   identical(
     patient_ids,
+    colnames(tissue_M)
+  ),
+
+  identical(
+    patient_ids,
+    colnames(plasma_M)
+  ),
+
+  identical(
+    patient_ids,
+    colnames(valid_pair_mask)
+  ),
+
+  identical(
+    patient_ids,
     patient_metadata$patient_id
   )
 )
 
 
 ############################################################
-## Check region IDs
+## Region-order validation
 ############################################################
 
 if (is.null(rownames(delta_M))) {
@@ -409,38 +416,95 @@ if (is.null(rownames(delta_M))) {
 }
 
 
-stopifnot(
-  "region_id" %in%
-    names(region_annotation)
+required_region_rownames <- list(
+  tissue_beta = rownames(tissue_beta),
+  plasma_beta = rownames(plasma_beta),
+  delta_beta = rownames(delta_beta),
+  tissue_M = rownames(tissue_M),
+  plasma_M = rownames(plasma_M),
+  delta_M = rownames(delta_M),
+  valid_pair_mask = rownames(valid_pair_mask)
 )
 
 
+if (
+  any(
+    vapply(
+      required_region_rownames,
+      is.null,
+      FUN.VALUE = logical(1)
+    )
+  )
+) {
+
+  stop(
+    "One or more analysis matrices lack region row names."
+  )
+}
+
+
 stopifnot(
+
+  identical(
+    rownames(delta_M),
+    rownames(tissue_beta)
+  ),
+
+  identical(
+    rownames(delta_M),
+    rownames(plasma_beta)
+  ),
+
+  identical(
+    rownames(delta_M),
+    rownames(delta_beta)
+  ),
+
+  identical(
+    rownames(delta_M),
+    rownames(tissue_M)
+  ),
+
+  identical(
+    rownames(delta_M),
+    rownames(plasma_M)
+  ),
+
+  identical(
+    rownames(delta_M),
+    rownames(valid_pair_mask)
+  ),
+
+  "region_id" %in%
+    names(region_annotation),
+
   identical(
     as.character(
       region_annotation$region_id
     ),
-    rownames(
-      delta_M
-    )
+    rownames(delta_M)
   )
 )
 
 
 cat(
-  "Regions loaded:",
+  "Regions loaded: ",
   format(
     nrow(delta_M),
     big.mark = ","
   ),
-  "\n"
+  "\n",
+  sep = ""
 )
 
+
 cat(
-  "Matched patients:",
+  "Matched patients: ",
   ncol(delta_M),
-  "\n"
+  "\n",
+  sep = ""
 )
+
 
 cat(
   "Input validation: PASS\n"
@@ -481,15 +545,18 @@ M_error <- max(
 
 
 cat(
-  "Maximum Delta Beta reconstruction error:",
+  "Maximum Delta Beta reconstruction error: ",
   beta_error,
-  "\n"
+  "\n",
+  sep = ""
 )
 
+
 cat(
-  "Maximum Delta M reconstruction error:",
+  "Maximum Delta M reconstruction error: ",
   M_error,
-  "\n"
+  "\n",
+  sep = ""
 )
 
 
@@ -564,6 +631,7 @@ cat(
   "\nValid-pair count summary:\n"
 )
 
+
 print(
   summary(
     n_valid_pairs
@@ -572,7 +640,7 @@ print(
 
 
 ############################################################
-## Retain analysis-eligible regions
+## Analysis-eligible regions
 ############################################################
 
 keep_analysis <-
@@ -581,19 +649,20 @@ keep_analysis <-
 
 
 cat(
-  "\nRegions with >=",
+  "\nRegions with >= ",
   minimum_valid_pairs,
-  " valid matched pairs:",
+  " valid matched pairs: ",
   format(
     sum(keep_analysis),
     big.mark = ","
   ),
-  "of",
+  " of ",
   format(
     length(keep_analysis),
     big.mark = ","
   ),
-  "\n"
+  "\n",
+  sep = ""
 )
 
 
@@ -606,7 +675,7 @@ if (!any(keep_analysis)) {
 
 
 ############################################################
-## 9. CREATE FINAL ANALYSIS MATRICES
+## 9. CREATE ANALYSIS MATRICES
 ############################################################
 
 delta_M_analysis <- delta_M_masked[
@@ -650,6 +719,11 @@ analysis_n_valid_pairs <-
   ]
 
 
+canonical_region_order <- rownames(
+  delta_M_analysis
+)
+
+
 stopifnot(
 
   nrow(
@@ -672,9 +746,22 @@ stopifnot(
     as.character(
       analysis_annotation$region_id
     ),
-    rownames(
-      delta_M_analysis
-    )
+    canonical_region_order
+  ),
+
+  identical(
+    rownames(delta_beta_analysis),
+    canonical_region_order
+  ),
+
+  identical(
+    rownames(tissue_beta_analysis),
+    canonical_region_order
+  ),
+
+  identical(
+    rownames(plasma_beta_analysis),
+    canonical_region_order
   )
 )
 
@@ -686,21 +773,6 @@ stopifnot(
 message_header(
   "RUNNING PAIRED LIMMA MODEL ON DELTA M"
 )
-
-
-############################################################
-## Each column is one matched patient.
-##
-## Intercept tests:
-##
-##      H0: mean Delta M = 0
-##
-## Because Delta M is already:
-##
-##      Plasma M - Tumor M
-##
-## this is a paired within-patient analysis.
-############################################################
 
 
 design <- matrix(
@@ -769,14 +841,12 @@ setnames(
 
 
 ############################################################
-## Restore matrix row order
+## Restore canonical matrix order
 ############################################################
 
 limma_results <- limma_results[
   match(
-    rownames(
-      delta_M_analysis
-    ),
+    canonical_region_order,
     region_id
   )
 ]
@@ -785,9 +855,7 @@ limma_results <- limma_results[
 stopifnot(
   identical(
     limma_results$region_id,
-    rownames(
-      delta_M_analysis
-    )
+    canonical_region_order
   )
 )
 
@@ -804,9 +872,7 @@ message_header(
 effect_summary <- data.table(
 
   region_id =
-    rownames(
-      delta_beta_analysis
-    ),
+    canonical_region_order,
 
   n_valid_pairs =
     analysis_n_valid_pairs,
@@ -861,10 +927,6 @@ effect_summary[
 ]
 
 
-############################################################
-## Direction
-############################################################
-
 effect_summary[
   ,
   direction :=
@@ -881,7 +943,7 @@ effect_summary[
 
 
 ############################################################
-## 12. REMOVE DUPLICATED EFFECT COLUMNS FROM ANNOTATION
+## 12. REMOVE DUPLICATED EFFECT COLUMNS
 ############################################################
 
 effect_columns <- c(
@@ -945,14 +1007,12 @@ dmr_results <- merge(
 
 
 ############################################################
-## Restore original region order
+## Restore canonical matrix order
 ############################################################
 
 dmr_results <- dmr_results[
   match(
-    rownames(
-      delta_M_analysis
-    ),
+    canonical_region_order,
     region_id
   )
 ]
@@ -961,9 +1021,7 @@ dmr_results <- dmr_results[
 stopifnot(
   identical(
     dmr_results$region_id,
-    rownames(
-      delta_M_analysis
-    )
+    canonical_region_order
   )
 )
 
@@ -971,11 +1029,9 @@ stopifnot(
 ############################################################
 ## 14. PRIMARY SIGNIFICANCE CLASS
 ##
-## Primary candidate definition:
+## Broad statistical DMR definition only.
 ##
-## FDR < 0.05
-## AND
-## |median Delta Beta| >= 0.05
+## Tier-A is defined downstream.
 ############################################################
 
 dmr_results[
@@ -1002,7 +1058,7 @@ dmr_results[
 
 
 ############################################################
-## 15. ADD EFFECT-SIZE FLAGS
+## 15. EFFECT-SIZE FLAGS
 ############################################################
 
 dmr_results[
@@ -1054,7 +1110,7 @@ dmr_results[
 
 
 ############################################################
-## 16. CREATE PRIMARY CANDIDATE TABLES
+## 16. PRIMARY CANDIDATE TABLES
 ############################################################
 
 candidate_DMRs <- dmr_results[
@@ -1076,32 +1132,35 @@ tumor_higher_DMRs <- candidate_DMRs[
 
 
 cat(
-  "\nPrimary candidate DMRs:",
+  "\nPrimary candidate DMRs: ",
   format(
     nrow(candidate_DMRs),
     big.mark = ","
   ),
-  "\n"
+  "\n",
+  sep = ""
 )
 
 
 cat(
-  "Plasma-higher DMRs:",
+  "Plasma-higher DMRs: ",
   format(
     nrow(plasma_higher_DMRs),
     big.mark = ","
   ),
-  "\n"
+  "\n",
+  sep = ""
 )
 
 
 cat(
-  "Tumor-higher DMRs:",
+  "Tumor-higher DMRs: ",
   format(
     nrow(tumor_higher_DMRs),
     big.mark = ","
   ),
-  "\n"
+  "\n",
+  sep = ""
 )
 
 
@@ -1129,14 +1188,16 @@ sensitivity_summary <- rbindlist(
         )
 
 
-      plasma_effect <- significant_effect &
+      plasma_effect <-
+        significant_effect &
         (
           dmr_results$median_delta_beta >
             0
         )
 
 
-      tumor_effect <- significant_effect &
+      tumor_effect <-
+        significant_effect &
         (
           dmr_results$median_delta_beta <
             0
@@ -1191,14 +1252,15 @@ n_fdr_significant <- sum(
 
 
 cat(
-  "\nRegions with FDR <",
+  "\nRegions with FDR < ",
   fdr_threshold,
-  ":",
+  ": ",
   format(
     n_fdr_significant,
     big.mark = ","
   ),
-  "\n"
+  "\n",
+  sep = ""
 )
 
 
@@ -1259,6 +1321,7 @@ analysis_summary <- data.table(
   ),
 
   value = c(
+
     nrow(
       region_annotation
     ),
@@ -1298,6 +1361,7 @@ cat(
   "\nAnalysis summary:\n"
 )
 
+
 print(
   analysis_summary
 )
@@ -1319,7 +1383,9 @@ analysis_settings <- data.table(
     "minimum_valid_pairs",
     "robust_ebayes",
     "trend_ebayes",
-    "genome_build"
+    "genome_build",
+    "result_order_in_RDS",
+    "TierA_defined_here"
   ),
 
   value = c(
@@ -1332,7 +1398,9 @@ analysis_settings <- data.table(
     minimum_valid_pairs,
     use_robust_ebayes,
     use_trend_ebayes,
-    obj$settings$genome_build
+    obj$settings$genome_build,
+    "canonical_matrix_region_order",
+    FALSE
   )
 )
 
@@ -1364,10 +1432,30 @@ stopifnot(
   ) ==
     expected_matched_patients,
 
-  "region_id" %in%
-    names(
-      dmr_results
-    ),
+  identical(
+    dmr_results$region_id,
+    canonical_region_order
+  ),
+
+  identical(
+    rownames(delta_M_analysis),
+    canonical_region_order
+  ),
+
+  identical(
+    rownames(delta_beta_analysis),
+    canonical_region_order
+  ),
+
+  identical(
+    rownames(tissue_beta_analysis),
+    canonical_region_order
+  ),
+
+  identical(
+    rownames(plasma_beta_analysis),
+    canonical_region_order
+  ),
 
   "mean_delta_M_limma" %in%
     names(
@@ -1416,32 +1504,55 @@ cat(
 
 
 ############################################################
-## 23. SORT RESULTS FOR OUTPUT
+## 23. CREATE SORTED COPIES FOR TSV OUTPUT ONLY
+##
+## IMPORTANT:
+## dmr_results itself remains in canonical matrix order.
 ############################################################
 
+dmr_results_ranked <- copy(
+  dmr_results
+)
+
+
+candidate_DMRs_ranked <- copy(
+  candidate_DMRs
+)
+
+
+plasma_higher_DMRs_ranked <- copy(
+  plasma_higher_DMRs
+)
+
+
+tumor_higher_DMRs_ranked <- copy(
+  tumor_higher_DMRs
+)
+
+
 setorder(
-  dmr_results,
+  dmr_results_ranked,
   FDR,
   -abs_median_delta_beta
 )
 
 
 setorder(
-  candidate_DMRs,
+  candidate_DMRs_ranked,
   FDR,
   -abs_median_delta_beta
 )
 
 
 setorder(
-  plasma_higher_DMRs,
+  plasma_higher_DMRs_ranked,
   FDR,
   -median_delta_beta
 )
 
 
 setorder(
-  tumor_higher_DMRs,
+  tumor_higher_DMRs_ranked,
   FDR,
   median_delta_beta
 )
@@ -1457,7 +1568,7 @@ message_header(
 
 
 fwrite(
-  dmr_results,
+  dmr_results_ranked,
   file.path(
     dmr_dir,
     "SOLID_tissue_vs_plasma_all_DMR_results.tsv.gz"
@@ -1468,7 +1579,7 @@ fwrite(
 
 
 fwrite(
-  candidate_DMRs,
+  candidate_DMRs_ranked,
   file.path(
     dmr_dir,
     "SOLID_tissue_vs_plasma_candidate_DMRs.tsv"
@@ -1478,7 +1589,7 @@ fwrite(
 
 
 fwrite(
-  plasma_higher_DMRs,
+  plasma_higher_DMRs_ranked,
   file.path(
     dmr_dir,
     "SOLID_tissue_vs_plasma_plasma_higher_DMRs.tsv"
@@ -1488,7 +1599,7 @@ fwrite(
 
 
 fwrite(
-  tumor_higher_DMRs,
+  tumor_higher_DMRs_ranked,
   file.path(
     dmr_dir,
     "SOLID_tissue_vs_plasma_tumor_higher_DMRs.tsv"
@@ -1556,6 +1667,9 @@ saveRDS(
 
 ############################################################
 ## 27. CREATE REUSABLE DMR OBJECT
+##
+## IMPORTANT:
+## all_results and all matrices use the same canonical order.
 ############################################################
 
 dmr_object <- list(
@@ -1571,6 +1685,9 @@ dmr_object <- list(
 
   tumor_higher_DMRs =
     tumor_higher_DMRs,
+
+  region_order =
+    canonical_region_order,
 
   delta_M =
     delta_M_analysis,
@@ -1619,6 +1736,12 @@ dmr_object <- list(
 
     delta_beta_definition =
       "plasma_minus_tumor",
+
+    region_order =
+      "canonical_matrix_region_order",
+
+    TierA_defined_here =
+      FALSE,
 
     creation_date =
       as.character(
@@ -1670,7 +1793,47 @@ stopifnot(
   nrow(
     validation_object$patient_metadata
   ) ==
-    expected_matched_patients
+    expected_matched_patients,
+
+  identical(
+    validation_object$region_order,
+    rownames(
+      validation_object$delta_M
+    )
+  ),
+
+  identical(
+    validation_object$region_order,
+    rownames(
+      validation_object$delta_beta
+    )
+  ),
+
+  identical(
+    validation_object$region_order,
+    rownames(
+      validation_object$tissue_beta
+    )
+  ),
+
+  identical(
+    validation_object$region_order,
+    rownames(
+      validation_object$plasma_beta
+    )
+  ),
+
+  identical(
+    validation_object$all_results$region_id,
+    validation_object$region_order
+  ),
+
+  identical(
+    rownames(
+      validation_object$valid_pair_mask
+    ),
+    validation_object$region_order
+  )
 )
 
 
@@ -1689,95 +1852,98 @@ cat(
 ############################################################
 
 cat(
-  "\n============================================\n"
-)
-
-cat(
-  "SOLID PAIRED DMR ANALYSIS COMPLETE\n"
-)
-
-cat(
-  "============================================\n"
+  "\n============================================\n",
+  "SOLID PAIRED DMR ANALYSIS COMPLETE\n",
+  "============================================\n",
+  sep = ""
 )
 
 
 cat(
-  "\nRegions tested:",
+  "\nRegions tested: ",
   format(
     nrow(
       dmr_results
     ),
     big.mark = ","
   ),
-  "\n"
+  "\n",
+  sep = ""
 )
 
 
 cat(
-  "Matched patients:",
+  "Matched patients: ",
   ncol(
     delta_M_analysis
   ),
-  "\n"
+  "\n",
+  sep = ""
 )
 
 
 cat(
-  "Minimum valid pairs:",
+  "Minimum valid pairs: ",
   minimum_valid_pairs,
-  "\n"
+  "\n",
+  sep = ""
 )
 
 
 cat(
-  "\nFDR-significant regions:",
+  "\nFDR-significant regions: ",
   format(
     n_fdr_significant,
     big.mark = ","
   ),
-  "\n"
+  "\n",
+  sep = ""
 )
 
 
 cat(
-  "Primary candidate DMRs:",
+  "Primary candidate DMRs: ",
   format(
     nrow(
       candidate_DMRs
     ),
     big.mark = ","
   ),
-  "\n"
+  "\n",
+  sep = ""
 )
 
 
 cat(
-  "Plasma-higher DMRs:",
+  "Plasma-higher DMRs: ",
   format(
     nrow(
       plasma_higher_DMRs
     ),
     big.mark = ","
   ),
-  "\n"
+  "\n",
+  sep = ""
 )
 
 
 cat(
-  "Tumor-higher DMRs:",
+  "Tumor-higher DMRs: ",
   format(
     nrow(
       tumor_higher_DMRs
     ),
     big.mark = ","
   ),
-  "\n"
+  "\n",
+  sep = ""
 )
 
 
 cat(
   "\nEffect-size sensitivity:\n"
 )
+
 
 print(
   sensitivity_summary
@@ -1787,6 +1953,7 @@ print(
 cat(
   "\nMedian Delta Beta among primary DMRs:\n"
 )
+
 
 if (nrow(candidate_DMRs) > 0L) {
 
@@ -1802,6 +1969,11 @@ if (nrow(candidate_DMRs) > 0L) {
     "No primary DMRs identified.\n"
   )
 }
+
+
+cat(
+  "\nCanonical region-order validation: PASS\n"
+)
 
 
 cat(
