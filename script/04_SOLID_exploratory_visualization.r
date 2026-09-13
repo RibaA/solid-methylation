@@ -1,18 +1,19 @@
 ############################################################
 ## 04_SOLID_exploratory_visualization.r
 ##
-## SOLID TUMOR–PLASMA EXPLORATORY ANALYSIS
+## SOLID TUMOR-PLASMA EXPLORATORY ANALYSIS
 ##
 ## Purpose:
 ##   1. Load the frozen downstream analysis-ready object
 ##   2. Apply the existing valid-pair mask
 ##   3. Summarize tumor/plasma Beta values by patient
-##   4. Summarize ΔBeta = Plasma - Tumor
+##   4. Summarize Delta Beta = Plasma - Tumor
 ##   5. Review valid-region availability by patient
-##   6. Generate descriptive figures
-##   7. Incorporate selected clinical metadata
+##   6. Calculate matched tumor-plasma correlations
+##   7. Generate descriptive figures
+##   8. Incorporate selected clinical metadata
 ##
-## Clinical variables available:
+## Clinical variables:
 ##   Grade
 ##   Age
 ##   Sex
@@ -22,10 +23,16 @@
 ##   os / OS_status
 ##
 ## IMPORTANT:
+##
+##   - Run from repository root:
+##
+##       C:/solid-methylation
+##
 ##   - No new filtering is performed
 ##   - No PCA is performed
 ##   - No clustering is performed
 ##   - No DMR testing is performed
+##
 ############################################################
 
 
@@ -42,13 +49,15 @@ options(
   warn = 1
 )
 
+
 ############################################################
-## 1. REQUIRED PACKAGE
+## 1. REQUIRED PACKAGES
 ############################################################
 
 required_packages <- c(
   "ggplot2"
 )
+
 
 missing_packages <- required_packages[
   !vapply(
@@ -59,6 +68,7 @@ missing_packages <- required_packages[
   )
 ]
 
+
 if (length(missing_packages) > 0L) {
 
   stop(
@@ -66,53 +76,76 @@ if (length(missing_packages) > 0L) {
     paste(
       missing_packages,
       collapse = ", "
-    ),
-    "\nInstall with:\n",
-    "install.packages(c(",
-    paste(
-      sprintf(
-        '"%s"',
-        missing_packages
-      ),
-      collapse = ", "
-    ),
-    "))"
+    )
   )
 }
+
 
 suppressPackageStartupMessages({
   library(ggplot2)
 })
 
+
 ############################################################
-## 2. PROJECT DIRECTORIES
+## 2. SHARED PLOTTING STYLE
+##
+## Expected objects:
+##
+##   sample_cols
+##   grade_cols
+##   theme_project()
+##
 ############################################################
 
-project_dir <- "C:/solid-methylation"
+plot_style_file <- file.path(
+  "script",
+  "00_plot_style_and_palettes.r"
+)
+
+
+if (!file.exists(plot_style_file)) {
+
+  stop(
+    "Shared plotting style file not found:\n",
+    plot_style_file
+  )
+}
+
+
+source(
+  plot_style_file
+)
+
+
+############################################################
+## 3. INPUT / OUTPUT DIRECTORIES
+############################################################
 
 input_file <- file.path(
-  project_dir,
   "result",
   "03_matched_tissue_plasma",
   "SOLID_downstream_analysis_ready.rds"
 )
 
+
 exploratory_dir <- file.path(
-  project_dir,
   "result",
   "03_matched_tissue_plasma",
   "exploratory"
 )
+
 
 figure_dir <- file.path(
   exploratory_dir,
   "figures"
 )
 
+
 table_dir <- file.path(
   exploratory_dir,
   "tables"
 )
+
 
 dir.create(
   figure_dir,
@@ -120,23 +153,144 @@ dir.create(
   showWarnings = FALSE
 )
 
+
 dir.create(
   table_dir,
   recursive = TRUE,
   showWarnings = FALSE
 )
 
-stopifnot(
-  file.exists(input_file)
-)
+
+if (!file.exists(input_file)) {
+
+  stop(
+    "Input object not found:\n",
+    input_file
+  )
+}
+
 
 ############################################################
-## 3. LOAD ANALYSIS-READY OBJECT
+## 4. HELPER FUNCTIONS
+############################################################
+
+safe_mean <- function(x) {
+
+  x <- x[
+    is.finite(x)
+  ]
+
+  if (length(x) == 0L) {
+    return(NA_real_)
+  }
+
+  mean(x)
+}
+
+
+safe_median <- function(x) {
+
+  x <- x[
+    is.finite(x)
+  ]
+
+  if (length(x) == 0L) {
+    return(NA_real_)
+  }
+
+  median(x)
+}
+
+
+safe_quantile <- function(
+    x,
+    probability
+) {
+
+  x <- x[
+    is.finite(x)
+  ]
+
+  if (length(x) == 0L) {
+    return(NA_real_)
+  }
+
+  quantile(
+    x,
+    probs = probability,
+    names = FALSE
+  )
+}
+
+
+safe_cor <- function(
+    x,
+    y,
+    method = "pearson"
+) {
+
+  keep <- is.finite(x) &
+    is.finite(y)
+
+  if (sum(keep) < 3L) {
+    return(NA_real_)
+  }
+
+  suppressWarnings(
+    cor(
+      x[keep],
+      y[keep],
+      method = method
+    )
+  )
+}
+
+
+save_plot <- function(
+    plot_object,
+    filename_base,
+    width,
+    height
+) {
+
+  ggsave(
+    filename = file.path(
+      figure_dir,
+      paste0(
+        filename_base,
+        ".png"
+      )
+    ),
+    plot = plot_object,
+    width = width,
+    height = height,
+    dpi = 300
+  )
+
+
+  ggsave(
+    filename = file.path(
+      figure_dir,
+      paste0(
+        filename_base,
+        ".pdf"
+      )
+    ),
+    plot = plot_object,
+    width = width,
+    height = height
+  )
+}
+
+
+############################################################
+## 5. LOAD ANALYSIS-READY OBJECT
 ############################################################
 
 obj <- readRDS(
   input_file
 )
+
 
 cat(
   "\n============================================\n"
@@ -150,8 +304,9 @@ cat(
   "============================================\n"
 )
 
+
 ############################################################
-## 4. BASIC VALIDATION
+## 6. BASIC VALIDATION
 ############################################################
 
 required_components <- c(
@@ -163,10 +318,12 @@ required_components <- c(
   "patient_metadata"
 )
 
+
 missing_components <- setdiff(
   required_components,
   names(obj)
 )
+
 
 if (length(missing_components) > 0L) {
 
@@ -179,36 +336,49 @@ if (length(missing_components) > 0L) {
   )
 }
 
+
 tissue_beta <- obj$tissue_beta
+
 plasma_beta <- obj$plasma_beta
+
 delta_beta <- obj$delta_beta
+
 valid_mask <- obj$valid_pair_mask
 
 clinical <- as.data.frame(
   obj$patient_metadata
 )
 
+
 stopifnot(
+
   identical(
     dim(tissue_beta),
     dim(plasma_beta)
   ),
+
   identical(
     dim(tissue_beta),
     dim(delta_beta)
   ),
+
   identical(
     dim(tissue_beta),
     dim(valid_mask)
   ),
+
   ncol(tissue_beta) == 13L,
+
   nrow(tissue_beta) == 124961L,
+
   nrow(clinical) == 13L
 )
+
 
 patient_ids <- colnames(
   tissue_beta
 )
+
 
 stopifnot(
   identical(
@@ -217,9 +387,11 @@ stopifnot(
   )
 )
 
+
 cat(
   "\nInput validation: PASS\n"
 )
+
 
 cat(
   "Patients:",
@@ -227,44 +399,54 @@ cat(
   "\n"
 )
 
+
 cat(
   "Regions:",
   nrow(tissue_beta),
   "\n"
 )
 
+
 ############################################################
-## 5. APPLY VALID-PAIR MASK
+## 7. APPLY VALID-PAIR MASK
 ##
 ## No observations are removed permanently.
-## Masking is used only so all descriptive comparisons use
-## the same valid tumor-plasma measurements.
+##
+## Masking ensures all descriptive comparisons use the same
+## frozen tumor-plasma eligibility criteria.
 ############################################################
 
 tissue_beta_valid <- tissue_beta
+
 plasma_beta_valid <- plasma_beta
+
 delta_beta_valid <- delta_beta
+
 
 tissue_beta_valid[
   !valid_mask
 ] <- NA_real_
 
+
 plasma_beta_valid[
   !valid_mask
 ] <- NA_real_
+
 
 delta_beta_valid[
   !valid_mask
 ] <- NA_real_
 
+
 ############################################################
-## 6. PATIENT-LEVEL SUMMARY
+## 8. PATIENT-LEVEL SUMMARY
 ############################################################
 
 patient_summary <- data.frame(
   patient_id = patient_ids,
   stringsAsFactors = FALSE
 )
+
 
 ############################################################
 ## Valid-region counts
@@ -275,10 +457,12 @@ patient_summary$n_valid_regions <- colSums(
   na.rm = TRUE
 )
 
+
 patient_summary$pct_valid_regions <-
   100 *
   patient_summary$n_valid_regions /
   nrow(valid_mask)
+
 
 ############################################################
 ## Tumor Beta summaries
@@ -287,24 +471,32 @@ patient_summary$pct_valid_regions <-
 patient_summary$mean_tumor_beta <- vapply(
   seq_along(patient_ids),
   function(j) {
-    mean(
-      tissue_beta_valid[, j],
-      na.rm = TRUE
+
+    safe_mean(
+      tissue_beta_valid[
+        ,
+        j
+      ]
     )
   },
   numeric(1)
 )
 
+
 patient_summary$median_tumor_beta <- vapply(
   seq_along(patient_ids),
   function(j) {
-    median(
-      tissue_beta_valid[, j],
-      na.rm = TRUE
+
+    safe_median(
+      tissue_beta_valid[
+        ,
+        j
+      ]
     )
   },
   numeric(1)
 )
+
 
 ############################################################
 ## Plasma Beta summaries
@@ -313,76 +505,98 @@ patient_summary$median_tumor_beta <- vapply(
 patient_summary$mean_plasma_beta <- vapply(
   seq_along(patient_ids),
   function(j) {
-    mean(
-      plasma_beta_valid[, j],
-      na.rm = TRUE
+
+    safe_mean(
+      plasma_beta_valid[
+        ,
+        j
+      ]
     )
   },
   numeric(1)
 )
+
 
 patient_summary$median_plasma_beta <- vapply(
   seq_along(patient_ids),
   function(j) {
-    median(
-      plasma_beta_valid[, j],
-      na.rm = TRUE
+
+    safe_median(
+      plasma_beta_valid[
+        ,
+        j
+      ]
     )
   },
   numeric(1)
 )
 
+
 ############################################################
-## Delta Beta summaries
+## Delta-Beta summaries
 ############################################################
 
 patient_summary$mean_delta_beta <- vapply(
   seq_along(patient_ids),
   function(j) {
-    mean(
-      delta_beta_valid[, j],
-      na.rm = TRUE
+
+    safe_mean(
+      delta_beta_valid[
+        ,
+        j
+      ]
     )
   },
   numeric(1)
 )
+
 
 patient_summary$median_delta_beta <- vapply(
   seq_along(patient_ids),
   function(j) {
-    median(
-      delta_beta_valid[, j],
-      na.rm = TRUE
+
+    safe_median(
+      delta_beta_valid[
+        ,
+        j
+      ]
     )
   },
   numeric(1)
 )
+
 
 patient_summary$q25_delta_beta <- vapply(
   seq_along(patient_ids),
   function(j) {
-    quantile(
-      delta_beta_valid[, j],
-      probs = 0.25,
-      na.rm = TRUE,
-      names = FALSE
+
+    safe_quantile(
+      delta_beta_valid[
+        ,
+        j
+      ],
+      0.25
     )
   },
   numeric(1)
 )
 
+
 patient_summary$q75_delta_beta <- vapply(
   seq_along(patient_ids),
   function(j) {
-    quantile(
-      delta_beta_valid[, j],
-      probs = 0.75,
-      na.rm = TRUE,
-      names = FALSE
+
+    safe_quantile(
+      delta_beta_valid[
+        ,
+        j
+      ],
+      0.75
     )
   },
   numeric(1)
 )
+
 
 ############################################################
 ## Direction summaries
@@ -392,11 +606,18 @@ patient_summary$pct_plasma_higher <- vapply(
   seq_along(patient_ids),
   function(j) {
 
-    x <- delta_beta_valid[, j]
+    x <- delta_beta_valid[
+      ,
+      j
+    ]
 
     x <- x[
       is.finite(x)
     ]
+
+    if (length(x) == 0L) {
+      return(NA_real_)
+    }
 
     100 *
       mean(
@@ -406,15 +627,23 @@ patient_summary$pct_plasma_higher <- vapply(
   numeric(1)
 )
 
+
 patient_summary$pct_tumor_higher <- vapply(
   seq_along(patient_ids),
   function(j) {
 
-    x <- delta_beta_valid[, j]
+    x <- delta_beta_valid[
+      ,
+      j
+    ]
 
     x <- x[
       is.finite(x)
     ]
+
+    if (length(x) == 0L) {
+      return(NA_real_)
+    }
 
     100 *
       mean(
@@ -424,8 +653,53 @@ patient_summary$pct_tumor_higher <- vapply(
   numeric(1)
 )
 
+
 ############################################################
-## 7. ADD CLINICAL METADATA
+## Tumor-plasma correlations
+############################################################
+
+patient_summary$tumor_plasma_pearson <- vapply(
+  seq_along(patient_ids),
+  function(j) {
+
+    safe_cor(
+      tissue_beta_valid[
+        ,
+        j
+      ],
+      plasma_beta_valid[
+        ,
+        j
+      ],
+      method = "pearson"
+    )
+  },
+  numeric(1)
+)
+
+
+patient_summary$tumor_plasma_spearman <- vapply(
+  seq_along(patient_ids),
+  function(j) {
+
+    safe_cor(
+      tissue_beta_valid[
+        ,
+        j
+      ],
+      plasma_beta_valid[
+        ,
+        j
+      ],
+      method = "spearman"
+    )
+  },
+  numeric(1)
+)
+
+
+############################################################
+## 9. ADD CLINICAL METADATA
 ############################################################
 
 clinical_for_merge <- clinical[
@@ -433,17 +707,18 @@ clinical_for_merge <- clinical[
   c(
     "patient_id",
     "Grade",
-    "Age",
+  #  "Age",
     "Sex",
     "ECOG",
-    "Response_RANO",
-    "pfs",
-    "PFS_status",
-    "os",
-    "OS_status"
+    "Response_RANO"
+  #  "pfs",
+  #  "PFS_status",
+  #  "os",
+  #  "OS_status"
   ),
   drop = FALSE
 ]
+
 
 patient_summary <- merge(
   patient_summary,
@@ -472,14 +747,25 @@ stopifnot(
 )
 
 
+patient_summary$Grade <- factor(
+  patient_summary$Grade
+)
+
+
+patient_summary$Sex <- factor(
+  patient_summary$Sex
+)
+
+
 ############################################################
-## 8. SAVE PATIENT SUMMARY
+## 10. SAVE PATIENT SUMMARY
 ############################################################
 
 patient_summary_file <- file.path(
   table_dir,
   "SOLID_patient_exploratory_summary.tsv"
 )
+
 
 write.table(
   patient_summary,
@@ -494,59 +780,76 @@ cat(
   "\nPatient-level exploratory summary:\n"
 )
 
+
 print(
   patient_summary
 )
 
 
 ############################################################
-## 9. SAMPLE-TYPE DISTRIBUTION SUMMARY
+## 11. SAMPLE-TYPE DISTRIBUTION SUMMARY
 ############################################################
 
 distribution_summary <- rbind(
 
   data.frame(
     sample_type = "Tumor",
-    mean_beta = mean(
-      tissue_beta_valid,
-      na.rm = TRUE
-    ),
-    median_beta = median(
-      tissue_beta_valid,
-      na.rm = TRUE
-    ),
-    q25_beta = quantile(
-      tissue_beta_valid,
-      0.25,
-      na.rm = TRUE
-    ),
-    q75_beta = quantile(
-      tissue_beta_valid,
-      0.75,
-      na.rm = TRUE
-    )
+
+    mean_beta =
+      mean(
+        tissue_beta_valid,
+        na.rm = TRUE
+      ),
+
+    median_beta =
+      median(
+        tissue_beta_valid,
+        na.rm = TRUE
+      ),
+
+    q25_beta =
+      quantile(
+        tissue_beta_valid,
+        0.25,
+        na.rm = TRUE
+      ),
+
+    q75_beta =
+      quantile(
+        tissue_beta_valid,
+        0.75,
+        na.rm = TRUE
+      )
   ),
 
   data.frame(
     sample_type = "Plasma",
-    mean_beta = mean(
-      plasma_beta_valid,
-      na.rm = TRUE
-    ),
-    median_beta = median(
-      plasma_beta_valid,
-      na.rm = TRUE
-    ),
-    q25_beta = quantile(
-      plasma_beta_valid,
-      0.25,
-      na.rm = TRUE
-    ),
-    q75_beta = quantile(
-      plasma_beta_valid,
-      0.75,
-      na.rm = TRUE
-    )
+
+    mean_beta =
+      mean(
+        plasma_beta_valid,
+        na.rm = TRUE
+      ),
+
+    median_beta =
+      median(
+        plasma_beta_valid,
+        na.rm = TRUE
+      ),
+
+    q25_beta =
+      quantile(
+        plasma_beta_valid,
+        0.25,
+        na.rm = TRUE
+      ),
+
+    q75_beta =
+      quantile(
+        plasma_beta_valid,
+        0.75,
+        na.rm = TRUE
+      )
   )
 )
 
@@ -555,6 +858,7 @@ distribution_summary_file <- file.path(
   table_dir,
   "SOLID_tumor_plasma_beta_distribution_summary.tsv"
 )
+
 
 write.table(
   distribution_summary,
@@ -569,27 +873,26 @@ cat(
   "\nTumor/plasma Beta summary:\n"
 )
 
+
 print(
   distribution_summary
 )
 
 
 ############################################################
-## 10. REPRODUCIBLE REGION SUBSET FOR DENSITY PLOTS
-##
-## Plotting every matrix cell is unnecessary.
-## Use the same randomly selected regions for all patients
-## and both sample types.
+## 12. REPRODUCIBLE REGION SUBSET FOR VISUALIZATION
 ############################################################
 
 set.seed(
   20260912
 )
 
+
 n_plot_regions <- min(
   20000L,
   nrow(tissue_beta_valid)
 )
+
 
 plot_region_index <- sort(
   sample(
@@ -608,6 +911,7 @@ tissue_plot_matrix <- tissue_beta_valid[
   drop = FALSE
 ]
 
+
 plasma_plot_matrix <- plasma_beta_valid[
   plot_region_index,
   ,
@@ -615,20 +919,29 @@ plasma_plot_matrix <- plasma_beta_valid[
 ]
 
 
+############################################################
+## 13. FIGURE 1
+## Tumor vs plasma Beta distributions
+############################################################
+
 beta_density_data <- rbind(
 
   data.frame(
-    beta = as.vector(
-      tissue_plot_matrix
-    ),
-    sample_type = "Tumor"
+    beta =
+      as.vector(
+        tissue_plot_matrix
+      ),
+    sample_type =
+      "Tumor"
   ),
 
   data.frame(
-    beta = as.vector(
-      plasma_plot_matrix
-    ),
-    sample_type = "Plasma"
+    beta =
+      as.vector(
+        plasma_plot_matrix
+      ),
+    sample_type =
+      "Plasma"
   )
 )
 
@@ -651,11 +964,6 @@ beta_density_data$sample_type <- factor(
 )
 
 
-############################################################
-## 11. FIGURE 1
-## Tumor vs plasma Beta distributions
-############################################################
-
 p1 <- ggplot(
   beta_density_data,
   aes(
@@ -664,62 +972,78 @@ p1 <- ggplot(
     fill = sample_type
   )
 ) +
+
   geom_density(
-    alpha = 0.20,
+    alpha = 0.18,
     linewidth = 0.9
   ) +
-  labs(
-    title = "SOLID tumor and plasma methylation distributions",
-    subtitle = paste0(
-      "Representative subset of ",
-      format(
-        n_plot_regions,
-        big.mark = ","
-      ),
-      " retained 1-kb regions"
-    ),
-    x = expression(beta),
-    y = "Density",
-    color = "Sample type",
-    fill = "Sample type"
+
+  scale_color_manual(
+    values =
+      sample_cols[
+        c(
+          "Tumor",
+          "Plasma"
+        )
+      ]
   ) +
-  theme_bw() +
-  theme(
-    plot.title = element_text(
-      face = "bold"
-    )
-  )
+
+  scale_fill_manual(
+    values =
+      sample_cols[
+        c(
+          "Tumor",
+          "Plasma"
+        )
+      ]
+  ) +
+
+  labs(
+    title =
+      "SOLID tumor and plasma methylation distributions",
+
+    subtitle =
+      paste0(
+        "Representative subset of ",
+        format(
+          n_plot_regions,
+          big.mark = ","
+        ),
+        " retained 1-kb regions"
+      ),
+
+    x =
+      "Beta value",
+
+    y =
+      "Density",
+
+    color =
+      "Sample type",
+
+    fill =
+      "Sample type"
+  ) +
+
+  theme_project()
 
 
-ggsave(
-  file.path(
-    figure_dir,
-    "SOLID_tumor_plasma_beta_density.png"
-  ),
+save_plot(
   p1,
-  width = 7,
-  height = 5,
-  dpi = 300
-)
-
-ggsave(
-  file.path(
-    figure_dir,
-    "SOLID_tumor_plasma_beta_density.pdf"
-  ),
-  p1,
+  "SOLID_tumor_plasma_beta_density",
   width = 7,
   height = 5
 )
 
 
 ############################################################
-## 12. PREPARE PAIRED MEDIAN-BETA DATA
+## 14. PREPARE PAIRED MEDIAN-BETA DATA
 ############################################################
 
 median_beta_long <- rbind(
 
   data.frame(
+
     patient_id =
       patient_summary$patient_id,
 
@@ -739,6 +1063,7 @@ median_beta_long <- rbind(
   ),
 
   data.frame(
+
     patient_id =
       patient_summary$patient_id,
 
@@ -772,14 +1097,15 @@ median_beta_long$Grade <- factor(
   median_beta_long$Grade
 )
 
+
 median_beta_long$Sex <- factor(
   median_beta_long$Sex
 )
 
 
 ############################################################
-## 13. FIGURE 2
-## Paired median Beta by patient
+## 15. FIGURE 2
+## Paired median Beta
 ############################################################
 
 p2 <- ggplot(
@@ -790,56 +1116,64 @@ p2 <- ggplot(
     group = patient_id
   )
 ) +
+
   geom_line(
-    alpha = 0.5
+    color = "grey65",
+    alpha = 0.65,
+    linewidth = 0.65
   ) +
+
   geom_point(
     aes(
-      color = Grade,
+      color = sample_type,
       shape = Sex
     ),
-    size = 3
+    size = 3.2
   ) +
+
+  scale_color_manual(
+    values =
+      sample_cols[
+        c(
+          "Tumor",
+          "Plasma"
+        )
+      ]
+  ) +
+
   labs(
-    title = "SOLID matched tumor–plasma median methylation",
-    subtitle = "Each line represents one matched patient",
-    x = NULL,
-    y = expression("Median " * beta),
-    color = "Grade",
-    shape = "Sex"
+    title =
+      "SOLID matched tumor-plasma median methylation",
+
+    subtitle =
+      "Each line represents one matched patient",
+
+    x =
+      NULL,
+
+    y =
+      "Median Beta",
+
+    color =
+      "Sample type",
+
+    shape =
+      "Sex"
   ) +
-  theme_bw() +
-  theme(
-    plot.title = element_text(
-      face = "bold"
-    )
-  )
+
+  theme_project()
 
 
-ggsave(
-  file.path(
-    figure_dir,
-    "SOLID_patient_paired_median_beta.png"
-  ),
+save_plot(
   p2,
-  width = 7,
-  height = 5.5,
-  dpi = 300
-)
-
-ggsave(
-  file.path(
-    figure_dir,
-    "SOLID_patient_paired_median_beta.pdf"
-  ),
-  p2,
+  "SOLID_patient_paired_median_beta",
   width = 7,
   height = 5.5
 )
 
 
 ############################################################
-## 14. FIGURE 3
+## 16. FIGURE 3
 ## Valid regions per patient
 ############################################################
 
@@ -856,53 +1190,52 @@ p3 <- ggplot(
   aes(
     x = patient_id_factor,
     y = pct_valid_regions,
-    fill = factor(Grade)
+    fill = Grade
   )
 ) +
-  geom_col() +
-  coord_flip() +
-  labs(
-    title = "SOLID valid paired regions by patient",
-    subtitle = "Eligibility based on the frozen paired-analysis criteria",
-    x = "Patient",
-    y = "Valid retained regions (%)",
-    fill = "Grade"
+
+  geom_col(
+    width = 0.72
   ) +
-  theme_bw() +
-  theme(
-    plot.title = element_text(
-      face = "bold"
-    )
-  )
+
+  coord_flip() +
+
+  scale_fill_manual(
+    values =
+      grade_cols
+  ) +
+
+  labs(
+    title =
+      "SOLID valid paired regions by patient",
+
+    subtitle =
+      "Eligibility based on the frozen paired-analysis criteria",
+
+    x =
+      "Patient",
+
+    y =
+      "Valid retained regions (%)",
+
+    fill =
+      "Grade"
+  ) +
+
+  theme_project()
 
 
-ggsave(
-  file.path(
-    figure_dir,
-    "SOLID_valid_region_percentage_by_patient.png"
-  ),
+save_plot(
   p3,
-  width = 7,
-  height = 6,
-  dpi = 300
-)
-
-ggsave(
-  file.path(
-    figure_dir,
-    "SOLID_valid_region_percentage_by_patient.pdf"
-  ),
-  p3,
+  "SOLID_valid_region_percentage_by_patient",
   width = 7,
   height = 6
 )
 
 
 ############################################################
-## 15. FIGURE 4
-## Median ΔBeta by patient
-##
-## ΔBeta = Plasma - Tumor
+## 17. FIGURE 4
+## Median Delta Beta by patient
 ############################################################
 
 p4 <- ggplot(
@@ -910,65 +1243,58 @@ p4 <- ggplot(
   aes(
     x = patient_id_factor,
     y = median_delta_beta,
-    fill = factor(Grade)
+    fill = Grade
   )
 ) +
-  geom_col() +
+
+  geom_col(
+    width = 0.72
+  ) +
+
   geom_hline(
     yintercept = 0,
-    linetype = 2
+    linetype = 2,
+    linewidth = 0.5,
+    color = "grey40"
   ) +
+
   coord_flip() +
-  labs(
-    title = expression(
-      paste(
-        "SOLID median ",
-        Delta,
-        beta,
-        " by patient"
-      )
-    ),
-    subtitle = expression(
-      Delta * beta == "Plasma" - "Tumor"
-    ),
-    x = "Patient",
-    y = expression(
-      "Median " * Delta * beta
-    ),
-    fill = "Grade"
+
+  scale_fill_manual(
+    values =
+      grade_cols
   ) +
-  theme_bw() +
-  theme(
-    plot.title = element_text(
-      face = "bold"
-    )
-  )
+
+  labs(
+    title =
+      "SOLID median delta Beta by patient",
+
+    subtitle =
+      "Delta Beta = Plasma - Tumor",
+
+    x =
+      "Patient",
+
+    y =
+      "Median delta Beta",
+
+    fill =
+      "Grade"
+  ) +
+
+  theme_project()
 
 
-ggsave(
-  file.path(
-    figure_dir,
-    "SOLID_patient_median_delta_beta.png"
-  ),
+save_plot(
   p4,
-  width = 7,
-  height = 6,
-  dpi = 300
-)
-
-ggsave(
-  file.path(
-    figure_dir,
-    "SOLID_patient_median_delta_beta.pdf"
-  ),
-  p4,
+  "SOLID_patient_median_delta_beta",
   width = 7,
   height = 6
 )
 
 
 ############################################################
-## 16. PREPARE SAMPLED ΔBeta DATA
+## 18. PREPARE SAMPLED DELTA-BETA DATA
 ############################################################
 
 delta_plot_list <- vector(
@@ -983,6 +1309,7 @@ for (j in seq_along(patient_ids)) {
     plot_region_index,
     j
   ]
+
 
   delta_plot_list[[j]] <- data.frame(
 
@@ -1030,8 +1357,8 @@ delta_plot_data$Grade <- factor(
 
 
 ############################################################
-## 17. FIGURE 5
-## Per-patient ΔBeta distribution
+## 19. FIGURE 5
+## Per-patient Delta-Beta distributions
 ############################################################
 
 p5 <- ggplot(
@@ -1042,151 +1369,208 @@ p5 <- ggplot(
     fill = Grade
   )
 ) +
+
   geom_boxplot(
-    outlier.shape = NA
+    outlier.shape = NA,
+    linewidth = 0.45
   ) +
+
   geom_hline(
     yintercept = 0,
-    linetype = 2
+    linetype = 2,
+    linewidth = 0.5,
+    color = "grey40"
   ) +
+
   coord_flip() +
-  labs(
-    title = expression(
-      paste(
-        "SOLID ",
-        Delta,
-        beta,
-        " distributions by patient"
-      )
-    ),
-    subtitle = paste0(
-      "Plasma - Tumor; representative subset of ",
-      format(
-        n_plot_regions,
-        big.mark = ","
-      ),
-      " regions"
-    ),
-    x = "Patient",
-    y = expression(
-      Delta * beta
-    ),
-    fill = "Grade"
+
+  scale_fill_manual(
+    values =
+      grade_cols
   ) +
-  theme_bw() +
-  theme(
-    plot.title = element_text(
-      face = "bold"
-    )
-  )
+
+  labs(
+    title =
+      "SOLID delta Beta distributions by patient",
+
+    subtitle =
+      paste0(
+        "Plasma - Tumor; representative subset of ",
+        format(
+          n_plot_regions,
+          big.mark = ","
+        ),
+        " regions"
+      ),
+
+    x =
+      "Patient",
+
+    y =
+      "Delta Beta",
+
+    fill =
+      "Grade"
+  ) +
+
+  theme_project()
 
 
-ggsave(
-  file.path(
-    figure_dir,
-    "SOLID_patient_delta_beta_distribution.png"
-  ),
+save_plot(
   p5,
-  width = 7.5,
-  height = 7,
-  dpi = 300
-)
-
-ggsave(
-  file.path(
-    figure_dir,
-    "SOLID_patient_delta_beta_distribution.pdf"
-  ),
-  p5,
+  "SOLID_patient_delta_beta_distribution",
   width = 7.5,
   height = 7
 )
 
 
 ############################################################
-## 18. FIGURE 6
-## Age vs median ΔBeta
-##
-## Exploratory clinical visualization only.
+## 20. FIGURE 6
+## Tumor-plasma Pearson correlation by patient
 ############################################################
+
+correlation_plot_data <- patient_summary
+
+
+correlation_plot_data$patient_id_cor <- factor(
+  correlation_plot_data$patient_id,
+  levels =
+    correlation_plot_data$patient_id[
+      order(
+        correlation_plot_data$tumor_plasma_pearson
+      )
+    ]
+)
+
 
 p6 <- ggplot(
-  patient_summary,
+  correlation_plot_data,
   aes(
-    x = Age,
-    y = median_delta_beta,
-    color = factor(Grade),
-    shape = Sex
+    x = tumor_plasma_pearson,
+    y = patient_id_cor,
+    color = Grade
   )
 ) +
-  geom_hline(
-    yintercept = 0,
-    linetype = 2
-  ) +
+
   geom_point(
-    size = 3
+    size = 3.2
   ) +
-  geom_text(
-    aes(
-      label = patient_id
-    ),
-    nudge_y = 0.005,
-    check_overlap = TRUE,
-    size = 3
+
+  scale_color_manual(
+    values =
+      grade_cols
   ) +
+
   labs(
-    title = expression(
-      paste(
-        "Age and median SOLID ",
-        Delta,
-        beta
-      )
-    ),
-    subtitle = "Exploratory visualization; no association test performed",
-    x = "Age",
-    y = expression(
-      "Median " * Delta * beta
-    ),
-    color = "Grade",
-    shape = "Sex"
+    title =
+      "SOLID tumor-plasma methylation correlation",
+
+    subtitle =
+      "Matched patient-level Pearson correlation",
+
+    x =
+      "Pearson correlation",
+
+    y =
+      "Patient",
+
+    color =
+      "Grade"
   ) +
-  theme_bw() +
-  theme(
-    plot.title = element_text(
-      face = "bold"
-    )
-  )
+
+  theme_project()
 
 
-ggsave(
-  file.path(
-    figure_dir,
-    "SOLID_age_vs_median_delta_beta.png"
-  ),
+save_plot(
   p6,
+  "SOLID_patient_tumor_plasma_correlation",
   width = 7,
-  height = 5.5,
-  dpi = 300
-)
-
-ggsave(
-  file.path(
-    figure_dir,
-    "SOLID_age_vs_median_delta_beta.pdf"
-  ),
-  p6,
-  width = 7,
-  height = 5.5
+  height = 6
 )
 
 
 ############################################################
-## 19. GLOBAL ΔBETA SUMMARY
+## 21. FIGURE 7
+## Age vs median Delta Beta
+##
+## Exploratory only.
+############################################################
+
+#p7 <- ggplot(
+#  patient_summary,
+#  aes(
+#    x = Age,
+#    y = median_delta_beta,
+#    color = Grade,
+#    shape = Sex
+#  )
+#) +
+
+#  geom_hline(
+#    yintercept = 0,
+#    linetype = 2,
+#    linewidth = 0.5,
+#    color = "grey40"
+#  ) +
+
+#  geom_point(
+#    size = 3
+#  ) +
+
+#  geom_text(
+#    aes(
+#      label = patient_id
+#    ),
+#    nudge_y = 0.005,
+#    check_overlap = TRUE,
+#    size = 3,
+#    show.legend = FALSE
+#  ) +
+
+#  scale_color_manual(
+#    values =
+#      grade_cols
+#  ) +
+
+#  labs(
+#    title =
+#      "Age and median SOLID delta Beta",
+
+#    subtitle =
+#      "Exploratory visualization; no association test performed",
+
+#    x =
+#      "Age",
+
+#    y =
+#      "Median delta Beta",
+
+#    color =
+#      "Grade",
+
+#    shape =
+#      "Sex"
+#  ) +
+
+#  theme_project()
+
+
+#save_plot(
+#  p7,
+#  "SOLID_age_vs_median_delta_beta",
+#  width = 7,
+#  height = 5.5
+#)
+
+
+############################################################
+## 22. GLOBAL DELTA-BETA SUMMARY
 ############################################################
 
 all_delta <- as.vector(
   delta_beta_valid
 )
+
 
 all_delta <- all_delta[
   is.finite(
@@ -1253,6 +1637,7 @@ delta_summary_file <- file.path(
   "SOLID_global_delta_beta_summary.tsv"
 )
 
+
 write.table(
   delta_global_summary,
   delta_summary_file,
@@ -1263,10 +1648,73 @@ write.table(
 
 
 ############################################################
-## 20. SAVE PLOTTING REGION IDS
-##
-## Allows exact reproduction of sampled density/boxplot
-## figures.
+## 23. CORRELATION SUMMARY
+############################################################
+
+correlation_summary <- data.frame(
+
+  statistic = c(
+    "minimum",
+    "Q1",
+    "median",
+    "mean",
+    "Q3",
+    "maximum"
+  ),
+
+  pearson = c(
+    min(
+      patient_summary$tumor_plasma_pearson,
+      na.rm = TRUE
+    ),
+
+    quantile(
+      patient_summary$tumor_plasma_pearson,
+      0.25,
+      na.rm = TRUE
+    ),
+
+    median(
+      patient_summary$tumor_plasma_pearson,
+      na.rm = TRUE
+    ),
+
+    mean(
+      patient_summary$tumor_plasma_pearson,
+      na.rm = TRUE
+    ),
+
+    quantile(
+      patient_summary$tumor_plasma_pearson,
+      0.75,
+      na.rm = TRUE
+    ),
+
+    max(
+      patient_summary$tumor_plasma_pearson,
+      na.rm = TRUE
+    )
+  )
+)
+
+
+correlation_summary_file <- file.path(
+  table_dir,
+  "SOLID_tumor_plasma_correlation_summary.tsv"
+)
+
+
+write.table(
+  correlation_summary,
+  correlation_summary_file,
+  sep = "\t",
+  quote = FALSE,
+  row.names = FALSE
+)
+
+
+############################################################
+## 24. SAVE PLOTTING REGION IDS
 ############################################################
 
 plot_regions <- obj$region_annotation[
@@ -1281,6 +1729,7 @@ plot_regions_file <- file.path(
   "SOLID_exploratory_plot_region_subset.tsv"
 )
 
+
 write.table(
   plot_regions,
   plot_regions_file,
@@ -1291,7 +1740,7 @@ write.table(
 
 
 ############################################################
-## 21. FINAL CONSOLE SUMMARY
+## 25. FINAL CONSOLE SUMMARY
 ############################################################
 
 cat(
@@ -1306,11 +1755,13 @@ cat(
   "============================================\n"
 )
 
+
 cat(
   "\nPatients:",
   length(patient_ids),
   "\n"
 )
+
 
 cat(
   "Retained regions:",
@@ -1318,15 +1769,18 @@ cat(
   "\n"
 )
 
+
 cat(
   "Regions sampled for visualization:",
   n_plot_regions,
   "\n"
 )
 
+
 cat(
   "\nValid-region percentage summary:\n"
 )
+
 
 print(
   summary(
@@ -1334,9 +1788,11 @@ print(
   )
 )
 
+
 cat(
   "\nMedian tumor Beta summary:\n"
 )
+
 
 print(
   summary(
@@ -1344,9 +1800,11 @@ print(
   )
 )
 
+
 cat(
   "\nMedian plasma Beta summary:\n"
 )
+
 
 print(
   summary(
@@ -1354,9 +1812,11 @@ print(
   )
 )
 
+
 cat(
-  "\nMedian patient ΔBeta summary:\n"
+  "\nMedian patient Delta Beta summary:\n"
 )
+
 
 print(
   summary(
@@ -1364,13 +1824,26 @@ print(
   )
 )
 
+
 cat(
-  "\nGlobal ΔBeta summary:\n"
+  "\nTumor-plasma Pearson correlation summary:\n"
 )
+
+
+print(
+  correlation_summary
+)
+
+
+cat(
+  "\nGlobal Delta Beta summary:\n"
+)
+
 
 print(
   delta_global_summary
 )
+
 
 cat(
   "\nPatient summary:\n",
@@ -1379,12 +1852,14 @@ cat(
   sep = ""
 )
 
+
 cat(
   "\nFigures:\n",
   figure_dir,
   "\n",
   sep = ""
 )
+
 
 cat(
   "\nTables:\n",
@@ -1395,7 +1870,7 @@ cat(
 
 
 ############################################################
-## 22. SESSION INFORMATION
+## 26. SESSION INFORMATION
 ############################################################
 
 capture.output(
