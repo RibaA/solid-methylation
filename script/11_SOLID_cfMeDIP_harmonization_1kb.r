@@ -1,41 +1,28 @@
 ##------------------------------------------------------------
-# SOLID cfMeDIP HARMONIZATION TO EXISTING 1-kb REGIONS
+# SOLID cfMeDIP HARMONIZATION TO MATCHED 1-kb REGIONS
 #
 # Script:
 #   11_SOLID_cfMeDIP_harmonization_1kb.r
 #
 # Goal:
-#   Map the matched 13-patient cfMeDIP data from ~300-bp
-#   regions to the SAME 1-kb genomic regions already used
-#   in the SOLID tumor EPIC + plasma 5-base analysis.
+#   Map matched 13-patient cfMeDIP data (~300-bp regions)
+#   to the SAME retained 1-kb regions used in the matched
+#   SOLID tumor EPIC + plasma 5-base analysis.
 #
 # Input:
 #   1. Matched 13-patient cfMeDIP log2CPM matrix
-#   2. cfMeDIP feature annotation (~300-bp regions)
-#   3. Existing SOLID tissue/plasma 1-kb region annotation
-#
-# Output:
-#   - cfMeDIP 1-kb CPM-scale matrix
-#   - cfMeDIP 1-kb log2CPM matrix
-#   - harmonized 1-kb region annotation
-#   - 300-bp -> 1-kb mapping table
-#   - harmonization summary
-#
-# Important:
-#   cfMeDIP input values are processed log2CPM enrichment values.
-#   They are NOT methylation beta values.
+#   2. cfMeDIP feature annotation
+#   3. FINAL matched/filtered SOLID 1-kb region annotation
 #
 # Aggregation:
-#   1. Back-transform log2CPM to linear CPM-scale signal
-#   2. Calculate an overlap-width-weighted mean across
-#      cfMeDIP windows overlapping each existing 1-kb region
-#   3. Transform the aggregated value back to log2 scale
+#   log2CPM
+#      -> 2^x CPM-scale signal
+#      -> overlap-width-weighted mean
+#      -> log2 aggregated signal
 #
-# Note:
-#   Because the exact upstream log2CPM transformation details
-#   are not available here, 2^log2CPM is treated as a
-#   back-transformed CPM-scale signal rather than assumed to
-#   be the original raw CPM.
+# Important:
+#   cfMeDIP is an enrichment assay.
+#   These values are NOT methylation Beta values.
 ##------------------------------------------------------------
 
 
@@ -46,7 +33,10 @@
 rm(list = ls())
 gc()
 
-options(stringsAsFactors = FALSE)
+options(
+  stringsAsFactors = FALSE,
+  scipen = 999
+)
 
 suppressPackageStartupMessages({
   library(GenomicRanges)
@@ -68,16 +58,11 @@ dir_cfmedip_object <- file.path(
   "objects"
 )
 
-dir_existing_matched <- file.path(
+dir_paired <- file.path(
   "result",
-  "03_matched_tissue_plasma"
+  "03_matched_tissue_plasma",
+  "paired_filtered"
 )
-
-dir_existing_preparation <- file.path(
-  dir_existing_matched,
-  "preparation"
-)
-
 
 ##------------------------------------------------------------
 # Output directories
@@ -99,12 +84,6 @@ dir_harmonized_table <- file.path(
 )
 
 dir.create(
-  dir_harmonized,
-  recursive = TRUE,
-  showWarnings = FALSE
-)
-
-dir.create(
   dir_harmonized_object,
   recursive = TRUE,
   showWarnings = FALSE
@@ -116,12 +95,11 @@ dir.create(
   showWarnings = FALSE
 )
 
-
 ##------------------------------------------------------------
 # 2. Input files
 ##------------------------------------------------------------
 
-file_medip_matched <- file.path(
+file_medip <- file.path(
   dir_cfmedip_object,
   "SOLID_cfMeDIP_matched13_log2CPM_matrix.rds"
 )
@@ -133,45 +111,35 @@ file_medip_annotation <- file.path(
 )
 
 file_target_1kb <- file.path(
-  dir_existing_preparation,
-  "SOLID_tissue_1kb_region_annotation.tsv.gz"
+  dir_paired,
+  "SOLID_paired_retained_region_annotation.tsv.gz"
 )
 
-
 ##------------------------------------------------------------
-# Check input files
+# Input check
 ##------------------------------------------------------------
 
 input_files <- c(
   matched_cfMeDIP_matrix =
-    file_medip_matched,
+    file_medip,
 
   cfMeDIP_feature_annotation =
     file_medip_annotation,
 
-  existing_1kb_annotation =
+  matched_1kb_annotation =
     file_target_1kb
 )
 
 input_check <- data.frame(
-  Input = names(
-    input_files
-  ),
-
-  Path = unname(
-    input_files
-  ),
-
-  Exists = file.exists(
-    input_files
-  ),
-
+  Input = names(input_files),
+  Path = unname(input_files),
+  Exists = file.exists(input_files),
   stringsAsFactors = FALSE
 )
 
 cat("\n")
 cat("====================================================\n")
-cat("SCRIPT 11 INPUT FILE CHECK\n")
+cat("SCRIPT 11 INPUT CHECK\n")
 cat("====================================================\n")
 
 print(
@@ -185,49 +153,36 @@ if (
 ) {
 
   stop(
-    paste0(
-      "One or more required input files are missing.\n",
-      "Do not continue until all three input paths are correct."
-    )
+    "One or more required Script 11 inputs are missing."
   )
 }
 
-
 ##------------------------------------------------------------
-# 3. Load matched 13-patient cfMeDIP matrix
+# 3. Load matched cfMeDIP matrix
 ##------------------------------------------------------------
 
-medip_matched <- readRDS(
-  file_medip_matched
+medip <- readRDS(
+  file_medip
 )
 
-if (
-  !is.matrix(
-    medip_matched
-  )
-) {
-
-  medip_matched <- as.matrix(
-    medip_matched
-  )
-}
+medip <- as.matrix(
+  medip
+)
 
 storage.mode(
-  medip_matched
+  medip
 ) <- "numeric"
 
 
 cat("\n")
 cat("====================================================\n")
-cat("MATCHED cfMeDIP MATRIX\n")
+cat("MATCHED cfMeDIP DATA\n")
 cat("====================================================\n")
 
 cat(
   "Regions:",
   format(
-    nrow(
-      medip_matched
-    ),
+    nrow(medip),
     big.mark = ","
   ),
   "\n"
@@ -235,47 +190,55 @@ cat(
 
 cat(
   "Patients:",
-  ncol(
-    medip_matched
-  ),
+  ncol(medip),
   "\n"
 )
 
-cat(
-  "\nPatient IDs:\n"
-)
-
 print(
-  colnames(
-    medip_matched
-  )
+  colnames(medip)
 )
 
 
 ##------------------------------------------------------------
-# Safety check
+# Critical input checks
 ##------------------------------------------------------------
 
 if (
-  ncol(
-    medip_matched
-  ) != 13
+  nrow(medip) == 0
+) {
+
+  stop(
+    "Input matched cfMeDIP matrix has zero regions."
+  )
+}
+
+if (
+  ncol(medip) != 13
 ) {
 
   stop(
     paste0(
-      "Expected 13 matched patients, but found ",
-      ncol(
-        medip_matched
-      ),
+      "Expected 13 matched cfMeDIP patients; found ",
+      ncol(medip),
       "."
     )
   )
 }
 
+if (
+  is.null(
+    rownames(medip)
+  )
+) {
+
+  stop(
+    "Original matched cfMeDIP matrix must have ~300-bp region IDs."
+  )
+}
+
 
 ##------------------------------------------------------------
-# 4. Load cfMeDIP feature annotation
+# 4. Load cfMeDIP ~300-bp feature annotation
 ##------------------------------------------------------------
 
 medip_annotation <- read.csv(
@@ -284,61 +247,20 @@ medip_annotation <- read.csv(
   check.names = FALSE
 )
 
-medip_annotation <- as.data.frame(
-  medip_annotation
-)
-
-
-cat("\n")
-cat("====================================================\n")
-cat("cfMeDIP FEATURE ANNOTATION\n")
-cat("====================================================\n")
-
-cat(
-  "Rows:",
-  format(
-    nrow(
-      medip_annotation
-    ),
-    big.mark = ","
-  ),
-  "\n"
-)
-
-cat(
-  "Columns:",
-  paste(
-    colnames(
-      medip_annotation
-    ),
-    collapse = ", "
-  ),
-  "\n"
-)
-
-
-##------------------------------------------------------------
-# Required annotation columns
-##------------------------------------------------------------
-
 required_medip_cols <- c(
+  "region_id",
   "chr",
   "start",
-  "end",
-  "region_id"
+  "end"
 )
 
 missing_medip_cols <- setdiff(
   required_medip_cols,
-  colnames(
-    medip_annotation
-  )
+  colnames(medip_annotation)
 )
 
 if (
-  length(
-    missing_medip_cols
-  ) > 0
+  length(missing_medip_cols) > 0
 ) {
 
   stop(
@@ -354,360 +276,172 @@ if (
 
 
 ##------------------------------------------------------------
-# Check matrix ↔ annotation correspondence
+# Matrix/annotation correspondence
 ##------------------------------------------------------------
 
 if (
-  nrow(
-    medip_annotation
-  ) !=
-    nrow(
-      medip_matched
-    )
+  nrow(medip_annotation) !=
+    nrow(medip)
 ) {
 
   stop(
-    "cfMeDIP matrix and feature annotation have different numbers of regions."
+    "cfMeDIP matrix and feature annotation have different row counts."
   )
 }
 
 
 ##------------------------------------------------------------
-# Reorder annotation to match matrix if necessary
+# Put annotation in exact matrix order
 ##------------------------------------------------------------
+
+idx_medip <- match(
+  rownames(medip),
+  medip_annotation$region_id
+)
 
 if (
-  !identical(
-    medip_annotation$region_id,
-    rownames(
-      medip_matched
-    )
-  )
+  anyNA(idx_medip)
 ) {
 
-  medip_match <- match(
-    rownames(
-      medip_matched
-    ),
-    medip_annotation$region_id
+  stop(
+    "Some cfMeDIP matrix regions are absent from feature annotation."
   )
-
-  if (
-    any(
-      is.na(
-        medip_match
-      )
-    )
-  ) {
-
-    stop(
-      "Could not match all cfMeDIP matrix regions to feature annotation."
-    )
-  }
-
-  medip_annotation <- medip_annotation[
-    medip_match,
-    ,
-    drop = FALSE
-  ]
 }
 
+medip_annotation <- medip_annotation[
+  idx_medip,
+  ,
+  drop = FALSE
+]
 
 stopifnot(
   identical(
-    medip_annotation$region_id,
-    rownames(
-      medip_matched
-    )
+    as.character(
+      medip_annotation$region_id
+    ),
+    rownames(medip)
   )
 )
 
 
 ##------------------------------------------------------------
-# 5. Load existing SOLID 1-kb annotation
+# 5. Load FINAL matched 1-kb region annotation
 ##------------------------------------------------------------
 
 target_1kb <- read.delim(
   file_target_1kb,
-  check.names = FALSE,
-  stringsAsFactors = FALSE
+  stringsAsFactors = FALSE,
+  check.names = FALSE
 )
 
 
 cat("\n")
 cat("====================================================\n")
-cat("EXISTING SOLID 1-kb REGION ANNOTATION\n")
+cat("MATCHED/FILTERED 1-kb TARGET REGIONS\n")
 cat("====================================================\n")
 
 cat(
   "Regions:",
   format(
-    nrow(
-      target_1kb
-    ),
+    nrow(target_1kb),
     big.mark = ","
   ),
   "\n"
 )
 
-cat(
-  "\nColumns:\n"
-)
-
 print(
-  colnames(
-    target_1kb
-  )
-)
-
-cat(
-  "\nFirst rows:\n"
-)
-
-print(
-  head(
-    target_1kb
-  )
+  colnames(target_1kb)
 )
 
 
-##------------------------------------------------------------
-# 6. Identify genomic-coordinate columns
-##------------------------------------------------------------
-
-chr_candidates <- c(
+required_target_cols <- c(
+  "region_id",
   "chr",
-  "chrom",
-  "chromosome",
-  "seqnames"
-)
-
-start_candidates <- c(
   "start",
-  "Start"
+  "end"
 )
 
-end_candidates <- c(
-  "end",
-  "End"
+missing_target_cols <- setdiff(
+  required_target_cols,
+  colnames(target_1kb)
 )
-
-
-chr_col <- chr_candidates[
-  chr_candidates %in%
-    colnames(
-      target_1kb
-    )
-][1]
-
-start_col <- start_candidates[
-  start_candidates %in%
-    colnames(
-      target_1kb
-    )
-][1]
-
-end_col <- end_candidates[
-  end_candidates %in%
-    colnames(
-      target_1kb
-    )
-][1]
-
 
 if (
-  is.na(
-    chr_col
-  ) ||
-    is.na(
-      start_col
-    ) ||
-    is.na(
-      end_col
-    )
+  length(missing_target_cols) > 0
 ) {
 
   stop(
-    paste0(
-      "Could not identify chr/start/end columns in ",
-      basename(
-        file_target_1kb
-      ),
-      "."
+    paste(
+      "Missing target annotation columns:",
+      paste(
+        missing_target_cols,
+        collapse = ", "
+      )
     )
   )
 }
 
-
-cat(
-  "\nUsing target-region coordinate columns:\n"
-)
-
-cat(
-  "Chromosome:",
-  chr_col,
-  "\n"
-)
-
-cat(
-  "Start:",
-  start_col,
-  "\n"
-)
-
-cat(
-  "End:",
-  end_col,
-  "\n"
-)
-
-
-##------------------------------------------------------------
-# Standardize target coordinates
-##------------------------------------------------------------
-
-target_1kb$chr_harmonized <- as.character(
-  target_1kb[
-    [
-      chr_col
-    ]
-  ]
-)
-
-target_1kb$start_harmonized <- as.numeric(
-  target_1kb[
-    [
-      start_col
-    ]
-  ]
-)
-
-target_1kb$end_harmonized <- as.numeric(
-  target_1kb[
-    [
-      end_col
-    ]
-  ]
-)
-
-
-##------------------------------------------------------------
-# Create target-region ID
-##------------------------------------------------------------
-
-target_1kb$region_1kb_id <- paste0(
-  target_1kb$chr_harmonized,
-  ":",
-  target_1kb$start_harmonized,
-  "-",
-  target_1kb$end_harmonized
-)
-
-
-##------------------------------------------------------------
-# Target-region widths
-##------------------------------------------------------------
-
-target_1kb$width_harmonized <- (
-  target_1kb$end_harmonized -
-    target_1kb$start_harmonized +
-    1
-)
-
-cat(
-  "\nMost common target-region widths:\n"
-)
-
-print(
-  head(
-    sort(
-      table(
-        target_1kb$width_harmonized
-      ),
-      decreasing = TRUE
-    ),
-    10
-  )
-)
-
-
-##------------------------------------------------------------
-# Remove invalid target coordinates
-##------------------------------------------------------------
-
-valid_target <- (
-  !is.na(
-    target_1kb$chr_harmonized
-  ) &
-    is.finite(
-      target_1kb$start_harmonized
-    ) &
-    is.finite(
-      target_1kb$end_harmonized
-    ) &
-    target_1kb$start_harmonized <=
-      target_1kb$end_harmonized
-)
 
 if (
-  !all(
-    valid_target
-  )
+  nrow(target_1kb) == 0
 ) {
 
-  warning(
-    paste(
-      sum(
-        !valid_target
-      ),
-      "target regions have invalid coordinates and will be removed."
-    )
+  stop(
+    "Matched 1-kb target annotation contains zero regions."
   )
-
-  target_1kb <- target_1kb[
-    valid_target,
-    ,
-    drop = FALSE
-  ]
 }
 
 
 ##------------------------------------------------------------
-# 7. Harmonize chromosome naming
+# 6. Standardize chromosomes and coordinates
 ##------------------------------------------------------------
 
-add_chr <- function(x) {
+normalize_chr <- function(x) {
 
-  x <- as.character(
+  x <- as.character(x)
+
+  x <- sub(
+    "^chr",
+    "",
+    x,
+    ignore.case = TRUE
+  )
+
+  paste0(
+    "chr",
     x
   )
-
-  ifelse(
-    grepl(
-      "^chr",
-      x,
-      ignore.case = TRUE
-    ),
-    x,
-    paste0(
-      "chr",
-      x
-    )
-  )
 }
 
 
-medip_annotation$chr_harmonized <- add_chr(
+medip_annotation$chr_std <- normalize_chr(
   medip_annotation$chr
 )
 
-target_1kb$chr_harmonized <- add_chr(
-  target_1kb$chr_harmonized
+target_1kb$chr_std <- normalize_chr(
+  target_1kb$chr
+)
+
+
+medip_annotation$start <- as.integer(
+  medip_annotation$start
+)
+
+medip_annotation$end <- as.integer(
+  medip_annotation$end
+)
+
+target_1kb$start <- as.integer(
+  target_1kb$start
+)
+
+target_1kb$end <- as.integer(
+  target_1kb$end
 )
 
 
 ##------------------------------------------------------------
-# Keep standard chromosomes
+# Standard chromosomes
 ##------------------------------------------------------------
 
 standard_chr <- c(
@@ -719,121 +453,119 @@ standard_chr <- c(
   "chrY"
 )
 
-keep_medip_chr <- (
-  medip_annotation$chr_harmonized %in%
+
+keep_medip <- (
+  medip_annotation$chr_std %in%
     standard_chr
 )
 
-keep_target_chr <- (
-  target_1kb$chr_harmonized %in%
+keep_target <- (
+  target_1kb$chr_std %in%
     standard_chr
 )
+
+
+medip_annotation <- medip_annotation[
+  keep_medip,
+  ,
+  drop = FALSE
+]
+
+medip <- medip[
+  keep_medip,
+  ,
+  drop = FALSE
+]
+
+target_1kb <- target_1kb[
+  keep_target,
+  ,
+  drop = FALSE
+]
 
 
 cat("\n")
-cat("====================================================\n")
-cat("STANDARD-CHROMOSOME FILTER\n")
-cat("====================================================\n")
+cat("Standard chromosome cfMeDIP regions:",
+    format(nrow(medip), big.mark = ","),
+    "\n")
 
-cat(
-  "cfMeDIP regions retained:",
-  sum(
-    keep_medip_chr
-  ),
-  "/",
-  length(
-    keep_medip_chr
-  ),
-  "\n"
-)
-
-cat(
-  "1-kb target regions retained:",
-  sum(
-    keep_target_chr
-  ),
-  "/",
-  length(
-    keep_target_chr
-  ),
-  "\n"
-)
-
-
-medip_annotation_use <- medip_annotation[
-  keep_medip_chr,
-  ,
-  drop = FALSE
-]
-
-medip_use <- medip_matched[
-  keep_medip_chr,
-  ,
-  drop = FALSE
-]
-
-target_1kb_use <- target_1kb[
-  keep_target_chr,
-  ,
-  drop = FALSE
-]
+cat("Standard chromosome target regions:",
+    format(nrow(target_1kb), big.mark = ","),
+    "\n")
 
 
 ##------------------------------------------------------------
-# 8. Build GRanges objects
+# Critical post-filter checks
+##------------------------------------------------------------
+
+if (
+  nrow(medip) == 0
+) {
+
+  stop(
+    "No cfMeDIP regions remain after chromosome filtering."
+  )
+}
+
+if (
+  nrow(target_1kb) == 0
+) {
+
+  stop(
+    "No matched 1-kb target regions remain after chromosome filtering."
+  )
+}
+
+
+##------------------------------------------------------------
+# 7. Build GRanges
 ##------------------------------------------------------------
 
 gr_medip <- GRanges(
   seqnames =
-    medip_annotation_use$chr_harmonized,
+    medip_annotation$chr_std,
 
   ranges = IRanges(
     start =
-      medip_annotation_use$start,
+      medip_annotation$start,
 
     end =
-      medip_annotation_use$end
+      medip_annotation$end
   )
 )
 
 
 gr_target <- GRanges(
   seqnames =
-    target_1kb_use$chr_harmonized,
+    target_1kb$chr_std,
 
   ranges = IRanges(
     start =
-      target_1kb_use$start_harmonized,
+      target_1kb$start,
 
     end =
-      target_1kb_use$end_harmonized
+      target_1kb$end
   )
 )
 
 
 ##------------------------------------------------------------
-# 9. Find overlaps
+# 8. Find cfMeDIP -> matched 1-kb overlaps
 ##------------------------------------------------------------
 
-cat(
-  "\nFinding cfMeDIP -> 1-kb overlaps...\n"
-)
-
 hits <- findOverlaps(
-  query = gr_medip,
-  subject = gr_target,
+  gr_medip,
+  gr_target,
   ignore.strand = TRUE
 )
 
 
 if (
-  length(
-    hits
-  ) == 0
+  length(hits) == 0
 ) {
 
   stop(
-    "No overlaps found between cfMeDIP regions and target 1-kb regions."
+    "No cfMeDIP overlaps found with matched 1-kb regions."
   )
 }
 
@@ -847,80 +579,82 @@ s_hit <- subjectHits(
 )
 
 
+##------------------------------------------------------------
+# Exact matched target regions with cfMeDIP support
+##------------------------------------------------------------
+
+supported_target_idx <- sort(
+  unique(
+    s_hit
+  )
+)
+
+n_supported <- length(
+  supported_target_idx
+)
+
+
+cat("\n")
+cat("====================================================\n")
+cat("OVERLAP SUMMARY\n")
+cat("====================================================\n")
+
 cat(
-  "Total overlaps:",
+  "Total cfMeDIP -> target overlaps:",
   format(
-    length(
-      hits
-    ),
+    length(hits),
     big.mark = ","
   ),
   "\n"
 )
 
 cat(
-  "cfMeDIP regions with >=1 target overlap:",
+  "Unique cfMeDIP regions overlapping targets:",
   format(
-    length(
-      unique(
-        q_hit
-      )
-    ),
+    length(unique(q_hit)),
     big.mark = ","
   ),
   "\n"
 )
 
 cat(
-  "Target 1-kb regions with >=1 cfMeDIP overlap:",
+  "Matched 1-kb regions with cfMeDIP support:",
   format(
-    length(
-      unique(
-        s_hit
-      )
-    ),
+    n_supported,
     big.mark = ","
   ),
   "\n"
 )
+
+
+if (
+  n_supported == 0
+) {
+
+  stop(
+    "No matched target regions have cfMeDIP support."
+  )
+}
 
 
 ##------------------------------------------------------------
-# 10. Calculate bp overlap
+# 9. Calculate overlap width
 ##------------------------------------------------------------
 
 overlap_start <- pmax(
-  start(
-    gr_medip
-  )[
-    q_hit
-  ],
-
-  start(
-    gr_target
-  )[
-    s_hit
-  ]
+  start(gr_medip)[q_hit],
+  start(gr_target)[s_hit]
 )
 
 overlap_end <- pmin(
-  end(
-    gr_medip
-  )[
-    q_hit
-  ],
-
-  end(
-    gr_target
-  )[
-    s_hit
-  ]
+  end(gr_medip)[q_hit],
+  end(gr_target)[s_hit]
 )
 
 overlap_bp <- (
   overlap_end -
     overlap_start +
-    1
+    1L
 )
 
 
@@ -931,493 +665,494 @@ if (
 ) {
 
   stop(
-    "Invalid genomic overlap widths detected."
+    "Invalid overlap widths detected."
   )
 }
 
 
 ##------------------------------------------------------------
-# 11. Mapping summary per 1-kb region
+# 10. Convert target indices into FINAL output row indices
+#
+# supported_target_idx:
+#   original row index in target_1kb
+#
+# output_target_idx:
+#   row index in final supported matrix
 ##------------------------------------------------------------
 
-n_windows_by_target <- tabulate(
+output_target_idx <- match(
   s_hit,
-  nbins = length(
-    gr_target
-  )
+  supported_target_idx
 )
 
 
-overlap_bp_tmp <- rowsum(
+if (
+  anyNA(
+    output_target_idx
+  )
+) {
+
+  stop(
+    "Internal target-index mapping failed."
+  )
+}
+
+
+##------------------------------------------------------------
+# 11. Final supported target annotation
+#
+# IMPORTANT:
+# This annotation uses EXACTLY the same row indices
+# that define the output matrices.
+##------------------------------------------------------------
+
+annotation_1kb_mapped <- target_1kb[
+  supported_target_idx,
+  ,
+  drop = FALSE
+]
+
+
+##------------------------------------------------------------
+# Create canonical final region IDs
+#
+# Use the EXISTING matched 5-base convention:
+#
+#   chr:start:end
+##------------------------------------------------------------
+
+annotation_1kb_mapped$region_id <- paste(
+  annotation_1kb_mapped$chr_std,
+  annotation_1kb_mapped$start,
+  annotation_1kb_mapped$end,
+  sep = ":"
+)
+
+
+if (
+  anyDuplicated(
+    annotation_1kb_mapped$region_id
+  )
+) {
+
+  stop(
+    "Duplicated final 1-kb region IDs detected."
+  )
+}
+
+
+##------------------------------------------------------------
+# 12. Mapping QC per supported target
+##------------------------------------------------------------
+
+n_windows <- tabulate(
+  output_target_idx,
+  nbins = n_supported
+)
+
+
+total_overlap_bp <- rowsum(
   overlap_bp,
-  group = s_hit,
-  reorder = FALSE
-)
-
-overlap_bp_by_target <- numeric(
-  length(
-    gr_target
-  )
-)
-
-overlap_bp_by_target[
-  as.integer(
-    rownames(
-      overlap_bp_tmp
-    )
-  )
-] <- overlap_bp_tmp[
+  group = output_target_idx,
+  reorder = TRUE
+)[
   ,
   1
 ]
 
 
-target_1kb_use$N_cfMeDIP_windows <- (
-  n_windows_by_target
+annotation_1kb_mapped$N_cfMeDIP_windows <- (
+  n_windows
 )
 
-target_1kb_use$Total_cfMeDIP_overlap_bp <- (
-  overlap_bp_by_target
-)
-
-target_1kb_use$Has_cfMeDIP <- (
-  target_1kb_use$N_cfMeDIP_windows > 0
+annotation_1kb_mapped$Total_cfMeDIP_overlap_bp <- (
+  total_overlap_bp
 )
 
 
-##------------------------------------------------------------
-# Approximate fraction of 1-kb region supported by cfMeDIP
-#
-# pmin(1, ...) prevents values above 100% when overlapping
-# cfMeDIP windows contribute duplicated genomic coverage.
-##------------------------------------------------------------
+target_width <- (
+  annotation_1kb_mapped$end -
+    annotation_1kb_mapped$start +
+    1L
+)
 
-target_1kb_use$cfMeDIP_coverage_fraction <- pmin(
+
+annotation_1kb_mapped$cfMeDIP_coverage_fraction <- pmin(
   1,
-  target_1kb_use$Total_cfMeDIP_overlap_bp /
-    target_1kb_use$width_harmonized
+  annotation_1kb_mapped$Total_cfMeDIP_overlap_bp /
+    target_width
 )
 
-target_1kb_use$cfMeDIP_coverage_percent <- (
+annotation_1kb_mapped$cfMeDIP_coverage_percent <- (
   100 *
-    target_1kb_use$cfMeDIP_coverage_fraction
+    annotation_1kb_mapped$cfMeDIP_coverage_fraction
 )
 
 
-cat("\n")
-cat("====================================================\n")
-cat("cfMeDIP -> 1-kb MAPPING SUMMARY\n")
-cat("====================================================\n")
-
 cat(
-  "Target regions:",
-  format(
-    nrow(
-      target_1kb_use
-    ),
-    big.mark = ","
-  ),
-  "\n"
-)
-
-cat(
-  "Target regions with cfMeDIP support:",
-  format(
-    sum(
-      target_1kb_use$Has_cfMeDIP
-    ),
-    big.mark = ","
-  ),
-  "\n"
-)
-
-cat(
-  "Percent target regions with cfMeDIP support:",
-  round(
-    100 *
-      mean(
-        target_1kb_use$Has_cfMeDIP
-      ),
-    2
-  ),
-  "%\n"
-)
-
-cat(
-  "\nNumber of cfMeDIP windows per supported 1-kb region:\n"
+  "\ncfMeDIP windows per supported 1-kb region:\n"
 )
 
 print(
   summary(
-    target_1kb_use$N_cfMeDIP_windows[
-      target_1kb_use$Has_cfMeDIP
-    ]
+    annotation_1kb_mapped$N_cfMeDIP_windows
   )
 )
 
 cat(
-  "\nApproximate cfMeDIP coverage of supported 1-kb regions (%):\n"
+  "\nApproximate cfMeDIP region coverage (%):\n"
 )
 
 print(
   summary(
-    target_1kb_use$cfMeDIP_coverage_percent[
-      target_1kb_use$Has_cfMeDIP
-    ]
+    annotation_1kb_mapped$cfMeDIP_coverage_percent
   )
 )
 
 
 ##------------------------------------------------------------
-# 12. Aggregate on linear CPM scale
-#
-# Step 1:
-#   log2CPM -> linear CPM-scale signal
-#
-# Step 2:
-#   overlap-width-weighted mean CPM-scale signal
-#
-# Step 3:
-#   log2 transform aggregated signal
-##------------------------------------------------------------
-
-
-##------------------------------------------------------------
-# Initialize linear-scale 1-kb matrix
+# 13. Aggregate on LINEAR CPM scale
 ##------------------------------------------------------------
 
 medip_1kb_cpm <- matrix(
   NA_real_,
-  nrow = length(
-    gr_target
-  ),
-  ncol = ncol(
-    medip_use
+  nrow = n_supported,
+  ncol = ncol(medip),
+  dimnames = list(
+    annotation_1kb_mapped$region_id,
+    colnames(medip)
   )
 )
 
-rownames(
-  medip_1kb_cpm
-) <- target_1kb_use$region_1kb_id
-
-colnames(
-  medip_1kb_cpm
-) <- colnames(
-  medip_use
-)
-
-
-##------------------------------------------------------------
-# Initialize log2-scale 1-kb matrix
-##------------------------------------------------------------
 
 medip_1kb_log2cpm <- matrix(
   NA_real_,
-  nrow = length(
-    gr_target
-  ),
-  ncol = ncol(
-    medip_use
+  nrow = n_supported,
+  ncol = ncol(medip),
+  dimnames = list(
+    annotation_1kb_mapped$region_id,
+    colnames(medip)
   )
-)
-
-rownames(
-  medip_1kb_log2cpm
-) <- target_1kb_use$region_1kb_id
-
-colnames(
-  medip_1kb_log2cpm
-) <- colnames(
-  medip_use
 )
 
 
 ##------------------------------------------------------------
-# Total overlap bp per target region
+# Denominator for weighted mean
 ##------------------------------------------------------------
 
 weight_sum <- rowsum(
   overlap_bp,
-  group = s_hit,
-  reorder = FALSE
-)
+  group = output_target_idx,
+  reorder = TRUE
+)[
+  ,
+  1
+]
 
-weight_target_ids <- as.integer(
-  rownames(
-    weight_sum
+
+if (
+  length(weight_sum) != n_supported
+) {
+
+  stop(
+    "Weight vector length does not match supported target count."
   )
-)
+}
 
 
 ##------------------------------------------------------------
-# Aggregate patient by patient
+# Aggregate each patient
 ##------------------------------------------------------------
 
 cat(
-  "\nAggregating cfMeDIP on linear CPM scale to 1-kb regions...\n"
+  "\nAggregating cfMeDIP signal to matched 1-kb regions...\n"
 )
 
 
 for (
   j in seq_len(
-    ncol(
-      medip_use
-    )
+    ncol(medip)
   )
 ) {
 
-  ##----------------------------------------------------------
-  # Back-transform log2CPM
-  ##----------------------------------------------------------
+  ## Back-transform processed log2CPM
+  ## to linear CPM-scale signal
 
   cpm_linear <- 2^(
-    medip_use[
+    medip[
       q_hit,
       j
     ]
   )
 
 
-  ##----------------------------------------------------------
-  # Weight by number of overlapping base pairs
-  ##----------------------------------------------------------
+  ## Weighted by overlap in bp
 
-  weighted_cpm <- (
+  weighted_signal <- (
     cpm_linear *
       overlap_bp
   )
 
 
-  ##----------------------------------------------------------
-  # Sum weighted signal within each target region
-  ##----------------------------------------------------------
-
   weighted_sum <- rowsum(
-    weighted_cpm,
-    group = s_hit,
-    reorder = FALSE
-  )
+    weighted_signal,
+    group = output_target_idx,
+    reorder = TRUE
+  )[
+    ,
+    1
+  ]
 
-  weighted_target_ids <- as.integer(
-    rownames(
-      weighted_sum
-    )
-  )
-
-
-  ##----------------------------------------------------------
-  # Safety check
-  ##----------------------------------------------------------
 
   if (
-    !identical(
-      weighted_target_ids,
-      weight_target_ids
-    )
+    length(weighted_sum) != n_supported
   ) {
 
     stop(
-      "Internal overlap aggregation ordering mismatch."
+      paste(
+        "Aggregation failed for patient",
+        colnames(medip)[j]
+      )
     )
   }
 
 
-  ##----------------------------------------------------------
-  # Weighted mean CPM-scale signal
-  ##----------------------------------------------------------
-
-  mean_cpm <- (
-    weighted_sum[
-      ,
-      1
-    ] /
-      weight_sum[
-        ,
-        1
-      ]
+  mean_cpm_scale <- (
+    weighted_sum /
+      weight_sum
   )
 
 
-  ##----------------------------------------------------------
-  # Save linear-scale matrix
-  ##----------------------------------------------------------
-
   medip_1kb_cpm[
-    weighted_target_ids,
+    ,
     j
-  ] <- mean_cpm
+  ] <- mean_cpm_scale
 
-
-  ##----------------------------------------------------------
-  # Return aggregated signal to log2 scale
-  ##----------------------------------------------------------
 
   medip_1kb_log2cpm[
-    weighted_target_ids,
+    ,
     j
   ] <- log2(
-    mean_cpm
+    mean_cpm_scale
   )
 }
 
 
 ##------------------------------------------------------------
-# 13. Keep 1-kb regions with cfMeDIP support
+# 14. CRITICAL final validation
 ##------------------------------------------------------------
-
-keep_1kb <- (
-  target_1kb_use$Has_cfMeDIP
-)
-
-medip_1kb_cpm_mapped <- medip_1kb_cpm[
-  keep_1kb,
-  ,
-  drop = FALSE
-]
-
-medip_1kb_mapped <- medip_1kb_log2cpm[
-  keep_1kb,
-  ,
-  drop = FALSE
-]
-
-annotation_1kb_mapped <- target_1kb_use[
-  keep_1kb,
-  ,
-  drop = FALSE
-]
-
-
-##------------------------------------------------------------
-# Check row correspondence
-##------------------------------------------------------------
-
-stopifnot(
-  identical(
-    rownames(
-      medip_1kb_cpm_mapped
-    ),
-    annotation_1kb_mapped$region_1kb_id
-  )
-)
-
-stopifnot(
-  identical(
-    rownames(
-      medip_1kb_mapped
-    ),
-    annotation_1kb_mapped$region_1kb_id
-  )
-)
-
 
 cat("\n")
 cat("====================================================\n")
-cat("HARMONIZED cfMeDIP 1-kb MATRICES\n")
+cat("FINAL HARMONIZED OUTPUT VALIDATION\n")
 cat("====================================================\n")
 
+
 cat(
-  "Regions:",
-  format(
+  "Annotation:",
+  nrow(annotation_1kb_mapped),
+  "rows\n"
+)
+
+cat(
+  "CPM-scale matrix:",
+  nrow(medip_1kb_cpm),
+  "x",
+  ncol(medip_1kb_cpm),
+  "\n"
+)
+
+cat(
+  "log2CPM matrix:",
+  nrow(medip_1kb_log2cpm),
+  "x",
+  ncol(medip_1kb_log2cpm),
+  "\n"
+)
+
+
+## ZERO rows are explicitly forbidden
+
+if (
+  nrow(
+    annotation_1kb_mapped
+  ) == 0
+) {
+
+  stop(
+    "FINAL annotation has zero rows. Nothing will be saved."
+  )
+}
+
+
+if (
+  nrow(
+    medip_1kb_cpm
+  ) == 0
+) {
+
+  stop(
+    "FINAL CPM matrix has zero rows. Nothing will be saved."
+  )
+}
+
+
+if (
+  nrow(
+    medip_1kb_log2cpm
+  ) == 0
+) {
+
+  stop(
+    "FINAL log2CPM matrix has zero rows. Nothing will be saved."
+  )
+}
+
+
+stopifnot(
+
+  nrow(
+    medip_1kb_cpm
+  ) ==
     nrow(
-      medip_1kb_mapped
+      annotation_1kb_mapped
     ),
-    big.mark = ","
-  ),
-  "\n"
-)
 
-cat(
-  "Patients:",
+  nrow(
+    medip_1kb_log2cpm
+  ) ==
+    nrow(
+      annotation_1kb_mapped
+    ),
+
   ncol(
-    medip_1kb_mapped
-  ),
-  "\n"
-)
+    medip_1kb_log2cpm
+  ) == 13,
 
-cat(
-  "Missing linear-scale values:",
-  format(
-    sum(
-      is.na(
-        medip_1kb_cpm_mapped
-      )
+  identical(
+    rownames(
+      medip_1kb_cpm
     ),
-    big.mark = ","
+    annotation_1kb_mapped$region_id
   ),
-  "\n"
-)
 
-cat(
-  "Missing log2-scale values:",
-  format(
-    sum(
-      is.na(
-        medip_1kb_mapped
-      )
+  identical(
+    rownames(
+      medip_1kb_log2cpm
     ),
-    big.mark = ","
+    annotation_1kb_mapped$region_id
   ),
-  "\n"
+
+  identical(
+    colnames(
+      medip_1kb_cpm
+    ),
+    colnames(
+      medip
+    )
+  ),
+
+  identical(
+    colnames(
+      medip_1kb_log2cpm
+    ),
+    colnames(
+      medip
+    )
+  )
 )
 
 
 ##------------------------------------------------------------
-# 14. Harmonization summary
+# Check non-finite values
+##------------------------------------------------------------
+
+cat(
+  "Non-finite CPM-scale values:",
+  sum(
+    !is.finite(
+      medip_1kb_cpm
+    )
+  ),
+  "\n"
+)
+
+cat(
+  "Non-finite log2CPM values:",
+  sum(
+    !is.finite(
+      medip_1kb_log2cpm
+    )
+  ),
+  "\n"
+)
+
+
+if (
+  any(
+    !is.finite(
+      medip_1kb_cpm
+    )
+  )
+) {
+
+  stop(
+    "Non-finite CPM-scale values detected."
+  )
+}
+
+
+if (
+  any(
+    !is.finite(
+      medip_1kb_log2cpm
+    )
+  )
+) {
+
+  stop(
+    "Non-finite log2CPM values detected."
+  )
+}
+
+
+##------------------------------------------------------------
+# 15. Harmonization summary
 ##------------------------------------------------------------
 
 harmonization_summary <- data.frame(
 
   Metric = c(
-    "Original cfMeDIP regions",
+    "Input cfMeDIP regions",
     "Matched patients",
-    "Target 1-kb regions",
-    "Target regions with cfMeDIP support",
-    "Target regions without cfMeDIP support",
-    "Percent target regions with cfMeDIP support",
-    "Median supported-region cfMeDIP coverage percent",
+    "Matched 1-kb target regions",
+    "cfMeDIP-supported matched 1-kb regions",
+    "Percent matched regions with cfMeDIP support",
     "Total cfMeDIP-target overlaps",
-    "Final harmonized 1-kb regions",
-    "Final harmonized patients"
+    "Median cfMeDIP windows per supported region",
+    "Median approximate cfMeDIP coverage percent"
   ),
 
   Value = c(
 
     nrow(
-      medip_matched
+      medip
     ),
 
     ncol(
-      medip_matched
+      medip
     ),
 
     nrow(
-      target_1kb_use
+      target_1kb
     ),
 
-    sum(
-      target_1kb_use$Has_cfMeDIP
-    ),
-
-    sum(
-      !target_1kb_use$Has_cfMeDIP
-    ),
+    n_supported,
 
     round(
       100 *
-        mean(
-          target_1kb_use$Has_cfMeDIP
-        ),
-      4
-    ),
-
-    round(
-      median(
-        target_1kb_use$cfMeDIP_coverage_percent[
-          target_1kb_use$Has_cfMeDIP
-        ],
-        na.rm = TRUE
-      ),
+        n_supported /
+        nrow(target_1kb),
       4
     ),
 
@@ -1425,12 +1160,16 @@ harmonization_summary <- data.frame(
       hits
     ),
 
-    nrow(
-      medip_1kb_mapped
+    median(
+      annotation_1kb_mapped$N_cfMeDIP_windows
     ),
 
-    ncol(
-      medip_1kb_mapped
+    round(
+      median(
+        annotation_1kb_mapped$cfMeDIP_coverage_percent,
+        na.rm = TRUE
+      ),
+      4
     )
   ),
 
@@ -1444,11 +1183,11 @@ print(
 
 
 ##------------------------------------------------------------
-# 15. Save harmonized outputs
+# 16. Save FINAL matched 1-kb objects
 ##------------------------------------------------------------
 
 saveRDS(
-  medip_1kb_cpm_mapped,
+  medip_1kb_cpm,
   file.path(
     dir_harmonized_object,
     "SOLID_cfMeDIP_matched13_1kb_CPMscale.rds"
@@ -1457,7 +1196,7 @@ saveRDS(
 
 
 saveRDS(
-  medip_1kb_mapped,
+  medip_1kb_log2cpm,
   file.path(
     dir_harmonized_object,
     "SOLID_cfMeDIP_matched13_1kb_log2CPM.rds"
@@ -1497,34 +1236,34 @@ write.csv(
 
 
 ##------------------------------------------------------------
-# 16. Save cfMeDIP -> 1-kb overlap mapping
+# 17. Save 300-bp -> matched 1-kb mapping
 ##------------------------------------------------------------
 
 overlap_mapping <- data.frame(
 
   cfMeDIP_region =
-    medip_annotation_use$region_id[
+    medip_annotation$region_id[
       q_hit
     ],
 
   cfMeDIP_chr =
-    medip_annotation_use$chr_harmonized[
+    medip_annotation$chr_std[
       q_hit
     ],
 
   cfMeDIP_start =
-    medip_annotation_use$start[
+    medip_annotation$start[
       q_hit
     ],
 
   cfMeDIP_end =
-    medip_annotation_use$end[
+    medip_annotation$end[
       q_hit
     ],
 
-  target_1kb_region =
-    target_1kb_use$region_1kb_id[
-      s_hit
+  target_region_id =
+    annotation_1kb_mapped$region_id[
+      output_target_idx
     ],
 
   overlap_bp =
@@ -1538,7 +1277,7 @@ write.table(
   overlap_mapping,
   file.path(
     dir_harmonized_table,
-    "SOLID_cfMeDIP_300bp_to_1kb_mapping.tsv.gz"
+    "SOLID_cfMeDIP_300bp_to_matched_1kb_mapping.tsv.gz"
   ),
   sep = "\t",
   quote = FALSE,
@@ -1547,71 +1286,127 @@ write.table(
 
 
 ##------------------------------------------------------------
-# 17. Save Script 11 checkpoint
+# 18. Save checkpoint
 ##------------------------------------------------------------
 
 saveRDS(
   list(
 
-    medip_1kb_CPMscale =
-      medip_1kb_cpm_mapped,
+    cfMeDIP_CPMscale =
+      medip_1kb_cpm,
 
-    medip_1kb_log2CPM =
-      medip_1kb_mapped,
+    cfMeDIP_log2CPM =
+      medip_1kb_log2cpm,
 
-    region_annotation_1kb =
+    region_annotation =
       annotation_1kb_mapped,
-
-    harmonization_summary =
-      harmonization_summary,
 
     patient_ids =
       colnames(
-        medip_1kb_mapped
-      )
+        medip_1kb_log2cpm
+      ),
+
+    harmonization_summary =
+      harmonization_summary
 
   ),
 
   file.path(
     dir_harmonized_object,
-    "SOLID_cfMeDIP_1kb_harmonization_checkpoint.rds"
+    "SOLID_cfMeDIP_matched13_1kb_harmonization_checkpoint.rds"
   )
 )
 
 
 ##------------------------------------------------------------
-# 18. Final console summary
+# 19. Reload saved matrices and verify
+##------------------------------------------------------------
+
+check_log2 <- readRDS(
+  file.path(
+    dir_harmonized_object,
+    "SOLID_cfMeDIP_matched13_1kb_log2CPM.rds"
+  )
+)
+
+check_cpm <- readRDS(
+  file.path(
+    dir_harmonized_object,
+    "SOLID_cfMeDIP_matched13_1kb_CPMscale.rds"
+  )
+)
+
+check_annotation <- readRDS(
+  file.path(
+    dir_harmonized_object,
+    "SOLID_cfMeDIP_matched13_1kb_region_annotation.rds"
+  )
+)
+
+
+stopifnot(
+
+  nrow(
+    check_log2
+  ) > 0,
+
+  nrow(
+    check_cpm
+  ) > 0,
+
+  nrow(
+    check_annotation
+  ) > 0,
+
+  identical(
+    dim(
+      check_log2
+    ),
+    dim(
+      medip_1kb_log2cpm
+    )
+  ),
+
+  identical(
+    dim(
+      check_cpm
+    ),
+    dim(
+      medip_1kb_cpm
+    )
+  ),
+
+  identical(
+    rownames(
+      check_log2
+    ),
+    check_annotation$region_id
+  )
+)
+
+
+##------------------------------------------------------------
+# 20. Final summary
 ##------------------------------------------------------------
 
 cat("\n")
 cat("====================================================\n")
-cat("SOLID cfMeDIP 1-kb HARMONIZATION COMPLETE\n")
+cat("SCRIPT 11 COMPLETE\n")
 cat("====================================================\n")
 
 cat(
-  "Input cfMeDIP regions:",
-  format(
-    nrow(
-      medip_matched
-    ),
-    big.mark = ","
-  ),
-  "\n"
-)
-
-cat(
-  "Input patients:",
+  "Matched patients:",
   ncol(
-    medip_matched
+    check_log2
   ),
   "\n"
 )
 
 cat(
-  "Existing target 1-kb regions:",
+  "Matched 1-kb regions with cfMeDIP support:",
   format(
     nrow(
-      target_1kb_use
+      check_log2
     ),
     big.mark = ","
   ),
@@ -1619,50 +1414,21 @@ cat(
 )
 
 cat(
-  "Final cfMeDIP-supported 1-kb regions:",
-  format(
-    nrow(
-      medip_1kb_mapped
-    ),
-    big.mark = ","
+  "Saved matrix dimensions:",
+  nrow(
+    check_log2
   ),
-  "\n"
-)
-
-cat(
-  "Final patients:",
+  "x",
   ncol(
-    medip_1kb_mapped
+    check_log2
   ),
   "\n"
 )
 
 cat(
-  "Median supported-region cfMeDIP coverage:",
-  round(
-    median(
-      annotation_1kb_mapped$cfMeDIP_coverage_percent,
-      na.rm = TRUE
-    ),
-    2
-  ),
-  "%\n"
-)
-
-cat(
-  "\nSaved linear-scale matrix:\n",
-  file.path(
-    dir_harmonized_object,
-    "SOLID_cfMeDIP_matched13_1kb_CPMscale.rds"
-  ),
-  "\n"
-)
-
-cat(
-  "\nSaved log2-scale matrix:\n",
-  file.path(
-    dir_harmonized_object,
-    "SOLID_cfMeDIP_matched13_1kb_log2CPM.rds"
+  "Saved annotation rows:",
+  nrow(
+    check_annotation
   ),
   "\n"
 )
